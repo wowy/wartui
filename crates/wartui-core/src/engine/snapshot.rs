@@ -1,4 +1,4 @@
-use wartui_bridge::{BridgeInfo, DisconnectCause};
+use wartui_bridge::{BridgeCore, BridgeInfo, DisconnectCause};
 use wartui_proto::bus::{Compat, NodeBoard, RecordKind, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::{ScanMode, Share};
@@ -108,6 +108,9 @@ pub struct TailEntry {
 pub struct Snapshot {
     /// The bridge, once it has announced itself.
     pub bridge: Option<BridgeInfo>,
+    /// The core of the bridge reached, while its last `Ready` went unread: it shares only the
+    /// frozen core with this host, so [`Self::bridge`] is `None` and the link down.
+    pub incompatible: Option<BridgeCore>,
     /// Whether the link is currently up.
     pub link_up: bool,
     /// Why it went down, if it did.
@@ -353,6 +356,7 @@ impl FleetEngine {
         let host_behind = undrivable(Compat::NodeAhead);
         Snapshot {
             bridge: self.bridge.clone(),
+            incompatible: self.incompatible,
             link_up: self.link_up,
             link_error: self.link_error.clone(),
             link_cause: self.link_cause,
@@ -448,6 +452,8 @@ mod tests {
             node_board: NodeBoard::NoCarrier,
             radio: None,
             image: None,
+            version: wartui_proto::link::BRIDGE_VERSION,
+            trial: wartui_proto::link::Trial::Settled,
         };
         engine.handle(Event::Link(LinkEvent::Connected(info)), now);
         let message = LogStr::try_from(NO_GPS_RECEIVER).expect("the text fits a LogStr");

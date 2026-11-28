@@ -98,10 +98,8 @@ fn map(psram: PSRAM<'static>) -> &'static mut [u8] {
 /// Out of line: a decoded op borrows the 1 KB frame.
 #[inline(never)]
 pub fn take(bytes: &[u8], shared: &Shared) {
-    let Some(op) = Op::decode(bytes) else {
-        shared.push_error("a cache op did not decode");
-        return;
-    };
+    // An op this P4 does not know is skipped, with no answer: it names no session to answer for.
+    let Some(op) = Op::decode(bytes) else { return };
     let status = shared.cache.borrow_mut().inner.take(op);
     if let Some(status) = status {
         answer(status, shared);

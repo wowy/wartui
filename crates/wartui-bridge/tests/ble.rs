@@ -14,11 +14,11 @@ use wartui_bridge::ble::{
 use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
 use wartui_proto::ble::{ATT_MTU, DOWN_VALUE_MAX};
-use wartui_proto::bus::{NodeBoard, Slot};
+use wartui_proto::bus::{NodeBoard, Slot, Version};
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, FromNodeBody, HostToBridge, LogStr, LoopPhase, MAX_FRAME,
-    MAX_HOST_FRAME, ShortStr, ToNodeBody, USB_TOOK_BRIDGE, decode_frame, encode_frame,
-    encode_host_frame,
+    BRIDGE_VERSION, BridgeToHost, End, FrameAccumulator, FromNodeBody, HostToBridge, LogStr,
+    LoopPhase, MAX_FRAME, MAX_HOST_FRAME, Ready, ReadyCore, ReadyRest, ShortStr, Standing,
+    ToNodeBody, Trial, USB_TOOK_BRIDGE, decode_host_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -34,17 +34,21 @@ fn frame(msg: &BridgeToHost) -> Vec<u8> {
     buf[..len].to_vec()
 }
 
+fn ready_on(version: Version, mac: [u8; 6], uptime_ms: u32) -> BridgeToHost {
+    BridgeToHost::Ready(Ready {
+        core: ReadyCore { mac, image: [0; 32], version, trial: Trial::Settled, uptime_ms },
+        rest: Some(ReadyRest {
+            fw_version: ShortStr::new(),
+            reset_cause: ResetCause::PowerOn,
+            last_phase: LoopPhase::Unknown,
+            node_board: NodeBoard::NoCarrier,
+            radio: None,
+        }),
+    })
+}
+
 fn ready(mac: [u8; 6], uptime_ms: u32) -> BridgeToHost {
-    BridgeToHost::Ready {
-        mac,
-        fw_version: ShortStr::new(),
-        reset_cause: ResetCause::PowerOn,
-        last_phase: LoopPhase::Unknown,
-        uptime_ms,
-        node_board: NodeBoard::NoCarrier,
-        radio: None,
-        image: None,
-    }
+    ready_on(BRIDGE_VERSION, mac, uptime_ms)
 }
 
 fn rx(rx_us: u32) -> BridgeToHost {
@@ -135,7 +139,7 @@ fn frames(writes: &[DownWrite]) -> Vec<HostToBridge> {
     let mut acc = FrameAccumulator::<MAX_HOST_FRAME>::new();
     bytes(writes)
         .into_iter()
-        .filter_map(|byte| acc.push(byte).map(|f| decode_frame(f).unwrap()))
+        .filter_map(|byte| acc.push(byte).map(|f| decode_host_frame(f).unwrap().unwrap()))
         .collect()
 }
 
@@ -205,10 +209,10 @@ fn ble_writer_splits_frame_into_mtu_less_header_when_frame_is_long() {
     let mut decoded = None;
     for byte in bytes(&writes) {
         if let Some(frame) = acc.push(byte) {
-            decoded = Some(decode_frame::<HostToBridge>(frame));
+            decoded = Some(decode_host_frame(frame));
         }
     }
-    assert_eq!(decoded, Some(Ok(cmd)));
+    assert_eq!(decoded, Some(Ok(Some(cmd))));
 }
 
 #[test]
@@ -346,6 +350,35 @@ fn ble_inbound_drops_frames_when_they_arrive_before_first_ready() {
 }
 
 #[test]
+fn ble_inbound_reports_incompatible_when_ready_is_from_another_major() {
+    // Its frozen core proves the bridge, and its other messages are not read.
+    let other = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+    let mut bytes = frame(&ready_on(other, BRIDGE, 500));
+    bytes.extend(frame(&rx(20)));
+    bytes.extend(frame(&takeover()));
+    let mut inbound = Inbound::new(None);
+    let heard = inbound.feed(&bytes, Instant::now());
+    assert_eq!(heard[0], Heard::Proved(BRIDGE), "remembered as a readable bridge is");
+    let events = events(heard);
+    let [LinkEvent::Incompatible { core, fresh: true }] = &events[..] else {
+        panic!("not reported incompatible: {events:?}")
+    };
+    assert_eq!((core.mac, core.version), (BRIDGE, other));
+    assert_eq!(core.standing, Standing::Apart { older: End::Host });
+    assert!(inbound.announced(), "it answered, so the stream has started");
+}
+
+#[test]
+fn ble_inbound_reports_wrong_bridge_when_unread_ready_names_another_address() {
+    // The address is in the frozen core, so the spec is checked as for a readable `Ready`.
+    let other = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+    let elsewhere = [0x02, 0xF2, 0x62, 0x10, 0x44, 0xC0];
+    let mut inbound = Inbound::new(Some(spec("02:00:5E:10:44:C0")));
+    let heard = inbound.feed(&frame(&ready_on(other, elsewhere, 500)), Instant::now());
+    assert_eq!(heard, [Heard::WrongBridge(elsewhere)]);
+}
+
+#[test]
 fn ble_inbound_reassembles_frames_when_split_across_notifications() {
     let mut bytes = frame(&ready(BRIDGE, 500));
     bytes.extend(frame(&rx(20)));
@@ -374,6 +407,18 @@ fn ble_inbound_reports_disconnect_then_same_life_when_usb_takes_and_returns_brid
     let back = events(heard);
     assert_eq!(back.len(), 1);
     assert!(matches!(&back[0], LinkEvent::Connected(info) if info.uptime_ms == 30_000));
+}
+
+#[test]
+fn ble_inbound_reports_again_when_same_life_answers_twice() {
+    // An update polls `Identify` and reads each answer.
+    let mut inbound = Inbound::new(None);
+    let t0 = Instant::now();
+    inbound.feed(&frame(&ready(BRIDGE, 10_000)), t0);
+    let heard = inbound.feed(&frame(&ready(BRIDGE, 11_000)), t0 + Duration::from_secs(1));
+    assert!(!heard.contains(&Heard::Proved(BRIDGE)), "proved once per connection");
+    let again = events(heard);
+    assert!(matches!(&again[..], [LinkEvent::Again(core)] if core.uptime_ms == 11_000));
 }
 
 #[test]

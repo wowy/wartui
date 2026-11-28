@@ -68,6 +68,9 @@ struct Firmware {
     chip: Chip,
     /// The partition table its images are made with, relative to `dir`.
     partition_table: &'static str,
+    /// The flash size its images name, as `--flash-size` takes it, or `None` for espflash's
+    /// default of 4 MB, which `save-image` refuses a table larger than.
+    flash_size: Option<&'static str>,
     /// Whether its images are merged (bootloader, partition table and app, from address 0)
     /// rather than the app alone, as one app slot holds it.
     merged: bool,
@@ -82,6 +85,7 @@ const NODE: Firmware = Firmware {
     what: "node",
     chip: Chip::Esp32c5,
     partition_table: "partitions.csv",
+    flash_size: None,
     merged: true,
     asset: "wartui-node-fw-esp32c5.bin",
 };
@@ -428,6 +432,16 @@ fn build_image(firmware: &Firmware, dir: &Path) -> Result<PathBuf> {
 
     let elf = dir.join(firmware.elf);
     let bin = elf.with_extension(if firmware.merged { "bin" } else { "app.bin" });
+    let ran = espflash(&save_image_args(firmware, dir, &elf, &bin));
+    if !ran.ok {
+        eprint!("{}{}", ran.stdout, ran.stderr);
+        bail!("espflash could not make an image of {}: {}", elf.display(), ran.last_line());
+    }
+    Ok(bin)
+}
+
+/// The `espflash save-image` arguments that save `elf` from the firmware in `dir` as `bin`.
+fn save_image_args(firmware: &Firmware, dir: &Path, elf: &Path, bin: &Path) -> Vec<String> {
     let merge: &[&str] = if firmware.merged { &["--merge", "--skip-padding"] } else { &[] };
     let mut args: Vec<String> =
         ["save-image", "--skip-update-check", "--chip", firmware.chip.name()]
@@ -437,14 +451,12 @@ fn build_image(firmware: &Firmware, dir: &Path) -> Result<PathBuf> {
             .collect();
     args.push("--partition-table".to_owned());
     args.push(dir.join(firmware.partition_table).to_string_lossy().into_owned());
+    if let Some(size) = firmware.flash_size {
+        args.extend(["--flash-size".to_owned(), size.to_owned()]);
+    }
     args.push(elf.to_string_lossy().into_owned());
     args.push(bin.to_string_lossy().into_owned());
-    let ran = espflash(&args);
-    if !ran.ok {
-        eprint!("{}{}", ran.stdout, ran.stderr);
-        bail!("espflash could not make an image of {}: {}", elf.display(), ran.last_line());
-    }
-    Ok(bin)
+    args
 }
 
 /// Why a release's image could not be had, as an operator reads it.
@@ -681,6 +693,15 @@ mod tests {
         let args = erase_otadata_args("/dev/ttyACM1", Chip::Esp32c5);
         assert_eq!(&args[..5], ["erase-region", "--port", "/dev/ttyACM1", "--chip", "esp32c5"]);
         assert_eq!(&args[args.len() - 2..], ["0xd000", "0x2000"]);
+    }
+
+    #[test]
+    fn flash_leaves_flash_size_to_espflash_when_saving_node_image() {
+        let (dir, elf, bin) = (Path::new("fw"), Path::new("e"), Path::new("b"));
+        for firmware in [&NODE, &NODE_APP] {
+            let args = save_image_args(firmware, dir, elf, bin);
+            assert!(!args.iter().any(|arg| arg == "--flash-size"), "{args:?}");
+        }
     }
 
     #[test]

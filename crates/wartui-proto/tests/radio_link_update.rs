@@ -6,8 +6,8 @@ use std::collections::VecDeque;
 use sha2::{Digest, Sha256};
 use wartui_proto::bus::{Board, UPDATE_CHUNK, UpdateState, UpdateStatus};
 use wartui_proto::link::{
-    BridgeToHost, HostToBridge, MAX_FRAME, MAX_HOST_FRAME, UPDATE_STATUS_MAX, UpdateOp,
-    UpdateStatusBytes, decode_frame, encode_frame, encode_host_frame,
+    BridgeToHost, HostToBridge, MAX_FRAME, MAX_HOST_FRAME, Reads, UPDATE_STATUS_MAX, UpdateOp,
+    UpdateStatusBytes, decode_frame, decode_host_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
 use wartui_proto::radio_link::PAYLOAD_MAX;
@@ -102,7 +102,7 @@ fn sent(op: &Op<'_>) -> Sent {
         Op::Chunk { offset, .. } => Sent::Chunk(*offset),
         Op::Commit { .. } => Sent::Commit,
         Op::Install { .. } => Sent::Install,
-        Op::Status(_) => panic!("a status sent down"),
+        Op::Status(_) | Op::Abort { .. } => panic!("the sender sent {op:?}"),
     }
 }
 
@@ -199,7 +199,7 @@ fn radio_link_update_op_fits_one_packet_when_chunk_is_full() {
 
 #[test]
 fn radio_link_update_op_decodes_none_when_op_unknown() {
-    for op in [0u8, 6, 0xFF] {
+    for op in [0u8, 7, 0xFF] {
         assert_eq!(Op::decode(&[op, 7, 0, 0, 0, 0, 0]), None);
     }
     assert_eq!(Op::decode(&[]), None);
@@ -214,6 +214,7 @@ fn radio_link_update_op_decodes_none_when_payload_short() {
         Op::Commit { session: 7 },
         Op::Install { session: 7 },
         Op::Status(UpdateStatus { session: 7, state: UpdateState::Idle, next_offset: 0 }),
+        Op::Abort { session: 7 },
     ];
     for op in ops {
         let len = op.encode(&mut out);
@@ -531,7 +532,7 @@ fn radio_link_update_sender_installs_image_when_ops_cross_the_usb_link_to_a_p4()
         let cmd = HostToBridge::Update(UpdateOp::from_slice(&buf[..len]).expect("an op fits"));
         let mut frame = [0u8; MAX_HOST_FRAME];
         let n = encode_host_frame(&cmd, &mut frame).expect("encodes");
-        let Ok(HostToBridge::Update(op)) = decode_frame(&mut frame[..n - 1]) else {
+        let Ok(Some(HostToBridge::Update(op))) = decode_host_frame(&mut frame[..n - 1]) else {
             panic!("not an update");
         };
         let Some(status) = p4.take(&op) else { continue };
@@ -541,7 +542,8 @@ fn radio_link_update_sender_installs_image_when_ops_cross_the_usb_link_to_a_p4()
             BridgeToHost::Update(UpdateStatusBytes::from_slice(&reply[..len]).expect("fits"));
         let mut frame = [0u8; MAX_FRAME];
         let n = encode_frame(&event, &mut frame).expect("encodes");
-        let Ok(BridgeToHost::Update(bytes)) = decode_frame(&mut frame[..n - 1]) else {
+        let Ok(Some(BridgeToHost::Update(bytes))) = decode_frame(&mut frame[..n - 1], Reads::Core)
+        else {
             panic!("not a status");
         };
         let Some(Op::Status(status)) = Op::decode(&bytes) else { panic!("not a status") };
@@ -607,4 +609,64 @@ fn radio_link_update_receive_hands_install_back_when_op_is_install() {
     let mut receiver = Receiver::new(Board::Esp32c6);
     let install = Op::Install { session: SESSION };
     assert_eq!(receive::<Slot>(&mut receiver, install, None, true), Received::Install(SESSION));
+}
+
+#[test]
+fn radio_link_update_op_pins_abort_bytes_when_encoded() {
+    let mut out = [0u8; OP_MAX];
+    let abort = Op::Abort { session: 0x42 };
+    let len = abort.encode(&mut out);
+    assert_eq!(out[..len], [6, 0x42]);
+    assert_eq!(Op::decode(&[6, 0x42]), Some(abort));
+    // A known op ignores bytes after its body.
+    assert_eq!(Op::decode(&[6, 0x42, 9, 9]), Some(abort));
+}
+
+/// A receiver holding a session `SESSION` has begun, in `c6`'s slot.
+fn begun(c6: &mut FakeC6) {
+    let image = image(100);
+    let begin = Op::Begin { session: SESSION, len: 100, sha256: sha256(&image) };
+    receive(&mut c6.receiver, begin, Some(&mut c6.slot), false);
+    assert!(c6.receiver.is_active());
+}
+
+#[test]
+fn radio_link_update_receive_drops_session_when_abort_names_it() {
+    let mut c6 = FakeC6::new();
+    begun(&mut c6);
+    let idle = UpdateStatus { session: SESSION, state: UpdateState::Idle, next_offset: 0 };
+    let abort = Op::Abort { session: SESSION };
+    assert_eq!(
+        receive(&mut c6.receiver, abort, Some(&mut c6.slot), false),
+        Received::Status(Some(idle))
+    );
+    assert!(!c6.receiver.is_active());
+}
+
+#[test]
+fn radio_link_update_receive_keeps_session_when_abort_names_another() {
+    let mut c6 = FakeC6::new();
+    begun(&mut c6);
+    let other = SESSION + 1;
+    let idle = UpdateStatus { session: other, state: UpdateState::Idle, next_offset: 0 };
+    let abort = Op::Abort { session: other };
+    assert_eq!(
+        receive(&mut c6.receiver, abort, Some(&mut c6.slot), false),
+        Received::Status(Some(idle))
+    );
+    assert_eq!(c6.receiver.status().session, SESSION);
+}
+
+#[test]
+fn radio_link_update_receive_answers_abort_idle_when_table_has_no_slot() {
+    // Whatever the slot and the trial: an abort is always answered.
+    let mut receiver = Receiver::new(Board::Esp32p4);
+    let idle = UpdateStatus { session: SESSION, state: UpdateState::Idle, next_offset: 0 };
+    for trial in [false, true] {
+        let abort = Op::Abort { session: SESSION };
+        assert_eq!(
+            receive::<Slot>(&mut receiver, abort, None, trial),
+            Received::Status(Some(idle))
+        );
+    }
 }

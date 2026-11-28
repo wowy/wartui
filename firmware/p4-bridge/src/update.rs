@@ -36,10 +36,7 @@ use wartui_firmware::ota::{Fault, Note, Ota, SettingsSector};
 use wartui_firmware::reboot;
 use wartui_proto::bus::{Board, UpdateState, UpdateStatus};
 use wartui_proto::heapless::Vec;
-use wartui_proto::link::{
-    BridgeToHost, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, LogStr, UPDATE_STATUS_MAX,
-    UpdateStatusBytes,
-};
+use wartui_proto::link::{BridgeToHost, LogStr, Trial, UPDATE_STATUS_MAX, UpdateStatusBytes};
 use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::{Op, Received, receive};
@@ -53,6 +50,14 @@ use crate::Shared;
 /// these, about 60 s, roll back an image no host confirms: the
 /// third boot rolls back as it starts ([`Ota::boot`]).
 pub const TRIAL_WATCHDOG: Duration = Duration::from_secs(30);
+
+/// The P4's [`BridgeToHost::Log`] after a host frame confirms its image on trial. A host reads
+/// the outcome from `Ready.trial`; the line is for the operator.
+const IMAGE_CONFIRMED: &str = "image confirmed by the host";
+
+/// The start of the P4's [`BridgeToHost::Error`] when confirming its image fails; the flash
+/// error follows after a colon.
+const IMAGE_NOT_CONFIRMED: &str = "could not confirm the image";
 
 /// Lines for the host held until the next announcement, since nothing reaches the host
 /// before its `Ready`: what the boot found, and the confirm.
@@ -230,11 +235,17 @@ pub fn note_host_frame(shared: &Shared) -> bool {
 /// Out of line: a decoded op borrows the 1 KB frame, and the flash work below is deep.
 #[inline(never)]
 pub fn take(bytes: &[u8], shared: &Shared) {
-    let Some(op) = Op::decode(bytes) else {
-        shared.push_error("an update op did not decode");
-        return;
-    };
+    // An op this P4 does not know is skipped, with no answer: it names no session to answer for.
+    let Some(op) = Op::decode(bytes) else { return };
+    let begin = matches!(op, Op::Begin { .. });
     let status = shared.updates.borrow_mut().take(op);
+    // A taken `Begin` stops the scan, as a `StopScan` does, whichever host sent it: an update
+    // needs the bridge's attention and ends in a reboot that stops the scan anyway, and a host on
+    // another major cannot send `StopScan`. A session that ends without `Install` leaves the scan
+    // stopped, since resuming a scan unasked after a failed update is not the bridge's call.
+    if begin && status.is_some_and(|status| status.state == UpdateState::Receiving) {
+        crate::fleet::stop(shared);
+    }
     if let Some(status) = status {
         answer(status, shared);
     }
@@ -288,6 +299,17 @@ pub fn receiving(shared: &Shared) -> bool {
 /// Whether the booted image is on trial.
 pub fn on_trial(shared: &Shared) -> bool {
     shared.updates.borrow().trial
+}
+
+/// Where the booted image's trial stands, for `Ready`. A host frame that confirms the image runs
+/// before the `Ready` answering it is built (`src/host.rs`), so that `Ready` says how it went.
+pub fn trial(shared: &Shared) -> Trial {
+    let updates = shared.updates.borrow();
+    match (updates.trial, updates.confirm_failed) {
+        (false, _) => Trial::Settled,
+        (true, false) => Trial::OnTrial,
+        (true, true) => Trial::ConfirmFailed,
+    }
 }
 
 /// The running slot's label, `ota_0` or `ota_1`, or `?` when the table names neither.

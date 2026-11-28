@@ -43,7 +43,8 @@ use crate::bus::{PANIC_TEXT_MAX, PanicStr, UpType};
 use crate::crc::crc32;
 use crate::host_owner::{Holder, Input};
 use crate::link::{
-    BridgeToHost, CobsStream, LinkError, LoopPhase, MAX_FRAME, ShortStr, decode_frame, encode_frame,
+    BridgeToHost, CobsStream, LinkError, LoopPhase, MAX_FRAME, Reads, ShortStr, decode_frame,
+    encode_frame,
 };
 use crate::ota::image::DIGEST_LEN;
 use crate::reset::ResetCause;
@@ -398,6 +399,12 @@ pub enum Bad {
     Malformed,
 }
 
+/// The link frame a `Frame` or `Snapshot` record holds. One whose code this build does not know
+/// is [`LinkError::Malformed`]: the log has no use for a frame it cannot read.
+fn frame(payload: &mut [u8]) -> Result<BridgeToHost, Bad> {
+    decode_frame(payload, Reads::All).map_err(Bad::Frame)?.ok_or(Bad::Frame(LinkError::Malformed))
+}
+
 /// Decode `record`, a range [`records`] gave, in place.
 ///
 /// # Errors
@@ -421,8 +428,8 @@ pub fn decode(record: &mut [u8]) -> Result<Entry<'_>, Bad> {
             }
             Body::Opened(exact(payload)?)
         }
-        Some(Kind::Frame) => Body::Frame(decode_frame(payload).map_err(Bad::Frame)?),
-        Some(Kind::Snapshot) => Body::Snapshot(decode_frame(payload).map_err(Bad::Frame)?),
+        Some(Kind::Frame) => Body::Frame(frame(payload)?),
+        Some(Kind::Snapshot) => Body::Snapshot(frame(payload)?),
         Some(Kind::PhoneLine) => {
             let (&class, line) = payload.split_first().ok_or(Bad::Malformed)?;
             Body::PhoneLine { class: class_from_code(class).ok_or(Bad::Malformed)?, line }

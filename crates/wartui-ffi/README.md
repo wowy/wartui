@@ -82,7 +82,8 @@ or placed by a typed-in position, is refused for every site.
 
 `hearNodes` listens for the fleet's heartbeats, and its `plan`, made from checked `NodeImage`s,
 is what a confirm screen shows and what `updateNodes` runs. `updateBridge` sends a checked
-`BridgeImage` and reads the outcome across the bridge's reboot. `fetchNodeImage` and
+`BridgeImage` and reads the outcome across the bridge's reboot from the bridge's announcements,
+which name the image it runs and whether it is still on trial. `fetchNodeImage` and
 `fetchBridgeImage` take a release's images, checked against its `SHA256SUMS`, for the release tag
 the app is built against.
 
@@ -94,11 +95,22 @@ the app is built against.
   recovered from a computer, so the app says so before it starts.
 - **Run either in a background task the OS does not suspend.** A bridge update can run several
   minutes and reads its outcome across reconnects. A `Stopper`, or an await the app cancels,
-  cancels a node update, telling each node under way. It abandons a bridge update only while the
-  image is sent, and the bridge keeps the image it runs; from `Installing` on, the update runs to
-  its outcome.
-- **A bridge update needs the bridge's announcement**, from `link.ready`. The link keeps the
-  latest one it reads, so after an install it names the new image.
+  cancels a node update, telling each node under way. It stops a bridge update only while the
+  image is sent, ending the update's session on the bridge, which keeps the image it runs, with
+  `Stopped`; from `Installing` on, the update runs to its outcome.
+- **A bridge update needs the bridge's `Ready`**, from `link.ready`. The link keeps the latest
+  one it reads, so after an install it names the new image.
+- **A bridge on another major, or another build of this one, takes an update and nothing else.**
+  The two share only the frozen core of the link, which names, updates and restarts the bridge.
+  `link.ready` refuses it with `ReadyError.Incompatible`, carrying both versions and how they
+  stand (`Standing`: `Apart` names the older end, `OtherBuild` the same major read as another
+  build); `Session.start` refuses it with `StartError.Incompatible` and creates no capture, and
+  `hearNodes` and `updateNodes` with `UpdateError.Incompatible`. `updateBridge` updates it, after a
+  drop of the link too, which is the fix when the bridge is older; when the library is older, the
+  app is. A bridge a minor
+  apart is captured over, and the view says so as a `Note.BridgeMinorApart`. A capture whose
+  bridge turns incompatible under it shows `Fault.BridgeIncompatible` first, in place of a link
+  fault.
 
 ## What a phone's adapter keeps to
 

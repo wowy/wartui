@@ -3,11 +3,17 @@
 //! [`message_text`] is the one-liner for each bridge message. `wartui sniff` prints it for a
 //! message the bridge sends now, and `wartui sd-log` for one its log kept, so a message reads
 //! alike in both.
+//!
+//! [`incompatible_text`] is what the operator reads of a bridge that shares only the frozen core
+//! with this build, wherever it is met: the footer's fault line and every command's refusal. It
+//! names both versions and the fix, which depends on which end is older. [`minor_apart_text`] is
+//! the footer's note for a bridge a minor apart, which leads with its fix too, since a note is
+//! clipped rather than wrapped.
 
 use wartui_core::engine::power_cycled_text;
-use wartui_proto::bus::{Heartbeat, NodeBoard, NodeBus, Slot, UpMsg};
+use wartui_proto::bus::{Heartbeat, NodeBoard, NodeBus, Slot, UpMsg, Version};
 use wartui_proto::link::{
-    BridgeHealth, BridgeToHost, LINK_PROTO_VERSION, SdLogState, SdState, SdStatus,
+    BridgeHealth, BridgeToHost, End, FRAME_VERSION, Ready, SdLogState, SdState, SdStatus, Standing,
 };
 use wartui_proto::mac;
 use wartui_proto::plan::{ChannelSet, SCAN_CHANNELS};
@@ -34,6 +40,41 @@ pub(crate) fn buffer_full(wifi: u64, ble: u64) -> Option<String> {
         .map(|(kind, n)| format!("{kind} {}", thousands(n)))
         .collect();
     (!figures.is_empty()).then(|| format!("buffer full {}", figures.join("  ")))
+}
+
+/// Why a bridge on `bridge`, standing `standing` against this build's `host`, takes no command but
+/// an update or a reset, and what to do: `wartui flash-bridge` when the bridge is older or another
+/// build, an update of wartui when wartui is older. Leads with the fix, so a footer that cuts the
+/// line keeps it.
+pub(crate) fn incompatible_text(bridge: Version, host: Version, standing: Standing) -> String {
+    match standing {
+        Standing::Apart { older: End::Bridge } => format!(
+            "run `wartui flash-bridge`: bridge firmware {bridge} is older than wartui {host}, \
+             which only updates or resets it"
+        ),
+        Standing::Apart { older: End::Host } => format!(
+            "update wartui: bridge firmware {bridge} is newer than wartui {host}, which only \
+             updates or resets it"
+        ),
+        // The last two are never incompatible, and read as a build this one cannot read.
+        Standing::OtherBuild | Standing::Same | Standing::Fewer { .. } => {
+            let of = if bridge == host { "one version" } else { "one major" };
+            format!(
+                "run `wartui flash-bridge` to put this build's firmware on the bridge: bridge \
+                 firmware {bridge} and wartui {host} are different builds of {of}"
+            )
+        }
+    }
+}
+
+/// A bridge on `bridge`, a minor apart from this build's `host`, with the `older` end lacking
+/// the other's newer messages until it is updated. Leads with the fix, so a footer that clips the
+/// line keeps it.
+pub(crate) fn minor_apart_text(bridge: Version, host: Version, older: End) -> String {
+    match older {
+        End::Bridge => format!("flash-bridge: bridge {bridge} is older than wartui {host}"),
+        End::Host => format!("update wartui: bridge {bridge} is newer than wartui {host}"),
+    }
 }
 
 /// The slot names `board` takes, as a range: `N1 to N10` on a carrier, `none` with no carrier.
@@ -246,10 +287,14 @@ pub(crate) struct MessageText {
 /// `msg` as one line, naming slots as `board` labels them.
 pub(crate) fn message_text(msg: &BridgeToHost, board: NodeBoard) -> MessageText {
     let (kind, text) = match msg {
-        BridgeToHost::Ready { mac: bridge_mac, fw_version, .. } => (
+        BridgeToHost::Ready(Ready { core, rest: Some(rest) }) => (
             "ready",
-            format!("{} firmware {fw_version} link v{LINK_PROTO_VERSION}", mac::full(bridge_mac)),
+            format!("{} firmware {} link v{FRAME_VERSION}", mac::full(&core.mac), rest.fw_version),
         ),
+        // A build whose rest this host cannot read names only its address and version.
+        BridgeToHost::Ready(Ready { core, rest: None }) => {
+            ("ready", format!("{} version {}", mac::full(&core.mac), core.version))
+        }
         BridgeToHost::Status { rx_count, dropped_tx, uptime_ms, rx_oversize, health, .. } => (
             "status",
             format!(
@@ -467,6 +512,20 @@ mod tests {
         };
         let said = message_text(&from_node(UpType::Heartbeat.as_u8(), &ahead.encode()), board);
         assert_eq!((said.kind, said.text.as_str()), ("node", "N8 type 1, 63 bytes"));
+    }
+
+    #[test]
+    fn message_text_names_address_and_version_when_ready_rest_is_unread() {
+        let core = wartui_proto::link::ReadyCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+            image: [0; 32],
+            version: wartui_proto::bus::Version::new(3, 1, 0),
+            trial: wartui_proto::link::Trial::Settled,
+            uptime_ms: 10,
+        };
+        let ready = BridgeToHost::Ready(wartui_proto::link::Ready { core, rest: None });
+        let said = message_text(&ready, NodeBoard::Carrier14);
+        assert_eq!((said.kind, said.text.as_str()), ("ready", "02:00:5E:10:44:C0 version 3.1.0"));
     }
 
     #[test]

@@ -6,8 +6,9 @@ use wartui_proto::bus::{DieTemp, NodeBoard, Slot, Vdd};
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, ScanMode};
 use wartui_proto::link::{
-    BluetoothStatus, BridgeHealth, BridgeToHost, Central, HostOwner, LoopPhase, QueueId, QueueStat,
-    RADIO_UPDATING, RadioLinkStats, SdLog, SdLogState, SdState, SdStatus,
+    BRIDGE_VERSION, BluetoothStatus, BridgeHealth, BridgeToHost, Central, HostOwner, LoopPhase,
+    QueueId, QueueStat, RADIO_UPDATING, RadioLinkStats, Ready, SdLog, SdLogState, SdState,
+    SdStatus, Trial,
 };
 use wartui_proto::ota::TRIAL_BOOTS;
 use wartui_proto::plan::{PlanSettings, Planner, SparseNodes};
@@ -66,18 +67,13 @@ fn up_pair() -> Pair {
     pair
 }
 
-fn uptime(frame: Option<BridgeToHost>) -> u32 {
-    match frame {
-        Some(BridgeToHost::Ready { uptime_ms, .. }) => uptime_ms,
-        other => panic!("not a Ready: {other:?}"),
-    }
+fn uptime(ready: Option<Ready>) -> u32 {
+    ready.expect("a Ready").core.uptime_ms
 }
 
-fn cause(frame: Option<BridgeToHost>) -> (ResetCause, LoopPhase) {
-    match frame {
-        Some(BridgeToHost::Ready { reset_cause, last_phase, .. }) => (reset_cause, last_phase),
-        other => panic!("not a Ready: {other:?}"),
-    }
+fn cause(ready: Option<Ready>) -> (ResetCause, LoopPhase) {
+    let rest = ready.expect("a Ready").rest.expect("a bridge always has a rest");
+    (rest.reset_cause, rest.last_phase)
 }
 
 fn stat(queue: QueueId, dropped: u32) -> QueueStat {
@@ -87,17 +83,13 @@ fn stat(queue: QueueId, dropped: u32) -> QueueStat {
 #[test]
 fn pair_waits_then_announces_radio_mac_when_hello_arrives() {
     let mut pair = pair();
-    assert_eq!(pair.ready(10), None);
+    assert_eq!(pair.ready(10, Trial::Settled), None);
     assert_eq!(pair.bridge_mac(), None);
     assert_eq!(pair.on_tick(RADIO_WAIT_MS - 1), PairEvent::None);
     assert_eq!(pair.on_hello(hello(900), 0, 1_000), PairEvent::NewLife);
-    match pair.ready(1_000) {
-        Some(BridgeToHost::Ready { mac, radio, .. }) => {
-            assert_eq!(mac, C6_MAC);
-            assert!(radio.is_some());
-        }
-        other => panic!("not a Ready: {other:?}"),
-    }
+    let ready = pair.ready(1_000, Trial::Settled).expect("a Ready");
+    assert_eq!(ready.core.mac, C6_MAC);
+    assert!(ready.rest.expect("a rest").radio.is_some());
     assert_eq!(pair.bridge_mac(), Some(C6_MAC));
     assert_eq!(pair.fault(), None);
 }
@@ -106,14 +98,10 @@ fn pair_waits_then_announces_radio_mac_when_hello_arrives() {
 fn pair_announces_own_mac_and_error_when_radio_never_answers() {
     let mut pair = pair();
     assert_eq!(pair.on_tick(RADIO_WAIT_MS), PairEvent::NewLife);
-    match pair.ready(RADIO_WAIT_MS) {
-        Some(BridgeToHost::Ready { mac, radio, uptime_ms, .. }) => {
-            assert_eq!(mac, OWN_MAC);
-            assert_eq!(radio, None);
-            assert_eq!(uptime_ms, 2_000);
-        }
-        other => panic!("not a Ready: {other:?}"),
-    }
+    let ready = pair.ready(RADIO_WAIT_MS, Trial::Settled).expect("a Ready");
+    assert_eq!(ready.core.mac, OWN_MAC);
+    assert_eq!(ready.rest.expect("a rest").radio, None);
+    assert_eq!(ready.core.uptime_ms, 2_000);
     assert!(pair.fault().unwrap().contains("not answering"));
     assert_eq!(pair.on_tick(RADIO_WAIT_MS + 1), PairEvent::None);
 }
@@ -122,9 +110,9 @@ fn pair_announces_own_mac_and_error_when_radio_never_answers() {
 fn pair_announces_new_life_when_hello_arrives_after_link_up() {
     let mut pair = up_pair();
     pair.note_seq(5_000);
-    let before = uptime(pair.ready(59_999));
+    let before = uptime(pair.ready(59_999, Trial::Settled));
     assert_eq!(pair.on_hello(hello(50), 0, 60_000), PairEvent::NewLife);
-    let after = uptime(pair.ready(60_000));
+    let after = uptime(pair.ready(60_000, Trial::Settled));
     assert_eq!(after, 50);
     assert!(after < before);
 }
@@ -132,7 +120,7 @@ fn pair_announces_new_life_when_hello_arrives_after_link_up() {
 #[test]
 fn pair_reports_c6_uptime_advancing_with_p4_clock() {
     let pair = up_pair();
-    assert_eq!(uptime(pair.ready(3_000)), 2_900);
+    assert_eq!(uptime(pair.ready(3_000, Trial::Settled)), 2_900);
 }
 
 #[test]
@@ -399,7 +387,7 @@ fn pair_ignores_repeated_hellos_when_seq_rises() {
     pair.note_radio_status(radio_status());
     assert_eq!(pair.on_hello(hello(73), 1, 1_001), PairEvent::None);
     assert_eq!(pair.on_hello(hello(74), 2, 1_002), PairEvent::None);
-    assert_eq!(uptime(pair.ready(1_002)), 74);
+    assert_eq!(uptime(pair.ready(1_002, Trial::Settled)), 74);
     match pair.status(1_002, p4_zero()) {
         BridgeToHost::Status { radio_link: link, .. } => assert_eq!(link.radio_crc_fail, 3),
         other => panic!("not a Status: {other:?}"),
@@ -460,33 +448,27 @@ fn pair_announces_new_life_when_c6_restarts_long_into_life() {
 fn pair_announces_radio_reset_cause_when_c6_restarts() {
     let mut pair = pair();
     pair.on_hello(hello(72), 0, 1_000);
-    assert_eq!(cause(pair.ready(1_000)), (ResetCause::PowerOn, LoopPhase::Unknown));
+    assert_eq!(cause(pair.ready(1_000, Trial::Settled)), (ResetCause::PowerOn, LoopPhase::Unknown));
     pair.note_seq(96_000);
     let mut crashed = hello(72);
     crashed.reset_cause = ResetCause::Watchdog;
     crashed.last_phase = LoopPhase::RadioLink;
     assert_eq!(pair.on_hello(crashed, 0, 60_000), PairEvent::NewLife);
-    assert_eq!(cause(pair.ready(60_000)), (ResetCause::Watchdog, LoopPhase::RadioLink));
+    assert_eq!(
+        cause(pair.ready(60_000, Trial::Settled)),
+        (ResetCause::Watchdog, LoopPhase::RadioLink)
+    );
 }
 
 #[test]
 fn pair_ready_carries_node_board_when_given_one() {
     let mut pair = pair();
     pair.on_hello(hello(900), 0, 1_000);
-    match pair.ready(1_000) {
-        Some(BridgeToHost::Ready { node_board, .. }) => {
-            assert_eq!(node_board, NodeBoard::NoCarrier)
-        }
-        other => panic!("not a Ready: {other:?}"),
-    }
+    let board = |ready: Option<Ready>| ready.and_then(|ready| ready.rest).map(|r| r.node_board);
+    assert_eq!(board(pair.ready(1_000, Trial::Settled)), Some(NodeBoard::NoCarrier));
     let mut pair = self::pair().with_node_board(NodeBoard::Carrier10);
     pair.on_hello(hello(900), 0, 1_000);
-    match pair.ready(1_000) {
-        Some(BridgeToHost::Ready { node_board, .. }) => {
-            assert_eq!(node_board, NodeBoard::Carrier10);
-        }
-        other => panic!("not a Ready: {other:?}"),
-    }
+    assert_eq!(board(pair.ready(1_000, Trial::Settled)), Some(NodeBoard::Carrier10));
 }
 
 #[test]
@@ -494,13 +476,24 @@ fn pair_ready_carries_own_image_when_given_one() {
     let own = [0x4F; 32];
     let mut pair = pair().with_own_image(Some(own));
     assert_eq!(pair.on_hello(hello(900), 0, 1_000), PairEvent::NewLife);
-    match pair.ready(1_000) {
-        Some(BridgeToHost::Ready { image, .. }) => assert_eq!(image, Some(own)),
-        other => panic!("not a Ready: {other:?}"),
-    }
+    let ready = pair.ready(1_000, Trial::Settled).expect("a Ready");
+    assert_eq!(ready.core.image(), Some(own));
     let mut bare = self::pair();
     bare.on_hello(hello(900), 0, 1_000);
-    assert!(matches!(bare.ready(1_000), Some(BridgeToHost::Ready { image: None, .. })));
+    // An image the P4 cannot read goes out as zeros.
+    let ready = bare.ready(1_000, Trial::Settled).expect("a Ready");
+    assert_eq!((ready.core.image, ready.core.image()), ([0; 32], None));
+}
+
+#[test]
+fn pair_ready_carries_trial_and_bridge_version_when_announcing() {
+    let mut pair = up_pair();
+    pair.note_seq(1);
+    for trial in [Trial::Settled, Trial::OnTrial, Trial::ConfirmFailed] {
+        let ready = pair.ready(1_000, trial).expect("a Ready");
+        assert_eq!(ready.core.trial, trial);
+        assert_eq!(ready.core.version, BRIDGE_VERSION);
+    }
 }
 
 #[test]
@@ -590,7 +583,7 @@ fn pair_updates_and_sends_no_records_when_digest_differs() {
     assert!(!pair.bridges());
     // The host still gets a Ready naming the C6, so it sees the fault.
     assert_eq!(pair.bridge_mac(), Some(C6_MAC));
-    assert!(pair.ready(1_000).is_some());
+    assert!(pair.ready(1_000, Trial::Settled).is_some());
     assert_eq!(pair.fault().unwrap(), "updating the radio to the bundled image (0%)");
     pair.note_update_progress(40);
     assert_eq!(pair.fault().unwrap(), "updating the radio to the bundled image (40%)");
@@ -653,7 +646,7 @@ fn pair_comes_up_with_new_life_when_hello_after_install_matches_bundle() {
     assert!(matches!(pair.state(), RadioState::Up(_)));
     assert_eq!(pair.fault(), None);
     // The new life is the C6's, so the host sees its reset cause.
-    assert_eq!(cause(pair.ready(9_500)), (ResetCause::Software, LoopPhase::Boot));
+    assert_eq!(cause(pair.ready(9_500, Trial::Settled)), (ResetCause::Software, LoopPhase::Boot));
     // No reset follows a hello.
     assert_eq!(pair.on_tick(9_000 + 10 * INSTALL_WAIT_MS), PairEvent::None);
 }

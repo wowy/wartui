@@ -26,7 +26,7 @@ use anyhow::{Result, bail};
 use chrono::Local;
 use clap::Args as ClapArgs;
 use wartui_app::position::{Fixed, Sources};
-use wartui_app::session::{HostBuild, Session, SessionConfig};
+use wartui_app::session::{HostBuild, Refusal, Session, SessionConfig};
 use wartui_app::settings::{Settings, SettingsStore};
 use wartui_app::upload::Endpoints;
 use wartui_core::gps::Gps;
@@ -260,10 +260,21 @@ pub async fn run(args: Args) -> Result<()> {
     let health = Box::new(wartui_desktop::health::read);
     let session =
         Session::start(session, link, None, Some(health), settings).map_err(|refused| {
-            match refused.error {
+            match refused.reason {
                 // Already names the path and says what to do.
-                e @ StoreError::Exists(_) => anyhow::Error::new(e),
-                e => anyhow::Error::new(e).context(format!("creating {}", db.display())),
+                Refusal::Store(e @ StoreError::Exists(_)) => anyhow::Error::new(e),
+                Refusal::Store(e) => {
+                    anyhow::Error::new(e).context(format!("creating {}", db.display()))
+                }
+                // A link not yet read has heard no `Ready`; the engine shows this one's fault.
+                Refusal::Incompatible(core) => anyhow::anyhow!(
+                    "{}",
+                    crate::text::incompatible_text(
+                        core.version,
+                        wartui_proto::link::BRIDGE_VERSION,
+                        core.standing
+                    )
+                ),
             }
         })?;
     let outcome = tui::run(session.snapshots(), session.controls(), upload).await;

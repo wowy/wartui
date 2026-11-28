@@ -1,17 +1,119 @@
 //! The link between the host and the P4 bridge: USB to the board's CH343, then UART0 at
-//! [`HOST_BAUD`] to the P4.
+//! [`HOST_BAUD`] to the P4, or Bluetooth through the board's C6 ([`crate::ble`]).
 //!
-//! The link has a version byte, a checksum, and framing that resynchronizes from arbitrary
-//! junk.
+//! A frame is a version byte, a body and a checksum, framed so a reader resynchronizes from
+//! arbitrary junk:
 //!
 //! ```text
-//! COBS( version:u8 || postcard(message) || crc16:u16le ) || 0x00
+//! COBS( version:u8 || body || crc16:u16le ) || 0x00
 //! ```
 //!
-//! The version byte sits *outside* the postcard blob, so a mismatch is detectable without
-//! a deserialize that cannot be trusted. The CRC rejects what the UART leg corrupts, which
-//! nothing retries, half-written frames, and the bootloader's log a reset prints down the same
-//! pipe.
+//! - `version` is [`FRAME_VERSION`], 2. It names the frame, not the messages. A frame carrying 1
+//!   comes from a build without the frozen core.
+//! - `crc16` is CRC-16/CCITT-FALSE ([`crc16`]) over `version || body`. It rejects what the UART
+//!   leg corrupts, which nothing retries, half-written frames, and the bootloader's log a reset
+//!   prints down the same pipe.
+//! - The body's first byte is the message's **code**, numbered per direction.
+//! - A `0x00` ends a frame and may come at any time: an empty frame is nothing. A host leads a
+//!   connection's first frame with one.
+//!
+//! **The skip rule.** A frame a side cannot read is dropped, and the conversation goes on: a COBS
+//! or CRC failure, another `version`, a code it does not know, or a body it cannot decode. No
+//! answer is owed and no state changes. [`decode_frame`] and [`decode_host_frame`] return
+//! `Ok(None)` for a sound frame whose code this side does not read.
+//!
+//! # The frozen core
+//!
+//! **Frozen forever, even before 1.0**, so any later host can reach, identify, update and restart
+//! any bridge that carries it:
+//!
+//! - the line: [`HOST_BAUD`], 8N1, no flow control, and a host that never moves DTR or RTS, which
+//!   are the board's reset circuit; over Bluetooth, the service, the write rules and the address
+//!   in [`crate::ble`];
+//! - the frame above and the skip rule. A frame carrying a frozen message is at most
+//!   [`MAX_FRAME`] bytes on the wire, and every bridge and host takes one that long
+//!   ([`MAX_HOST_FRAME`]);
+//! - the five messages below, laid out by hand and read before any postcard, so neither an enum
+//!   reorder nor a postcard change moves them. A reader ignores bytes after the body it knows, and
+//!   these codes are never reused;
+//! - the handshake, the update conversation and what an update leaves in place, below.
+//!
+//! | Direction | Code | Message | Body after the code |
+//! |---|---|---|---|
+//! | host to bridge | 0 | [`HostToBridge::Identify`] | none |
+//! | host to bridge | 2 | [`HostToBridge::Reset`] | none. The bridge reboots, and answers nothing |
+//! | host to bridge | 4 | [`HostToBridge::Update`] | a LEB128 length, then one op, at most [`OP_MAX`] bytes |
+//! | bridge to host | 0 | [`BridgeToHost::Ready`] | [`Ready`]'s layout |
+//! | bridge to host | 5 | [`BridgeToHost::Update`] | a LEB128 length, then one `Status` op, at most [`UPDATE_STATUS_MAX`] bytes |
+//!
+//! Everything else changes between builds: every other message both ways, and the rest of
+//! `Ready`. The node image upload ([`HostToBridge::CacheImage`]) is one: it carries the frozen
+//! ops under an unfrozen code. So are pairing and the bonds' record layout, the notice a central
+//! gets when USB takes the bridge, and each side's own timing. An unfrozen code belongs to the
+//! build that sent it, and means what that build's major says.
+//!
+//! # What the version means
+//!
+//! [`ReadyCore::version`] is the P4 firmware's (`firmware/p4-bridge/Cargo.toml`), and follows
+//! semantic versioning. The rule is frozen with the field, so a later host reads an older
+//! bridge's version by it:
+//!
+//! | Part | A bump means | Two ends that differ in it |
+//! |---|---|---|
+//! | major | an unfrozen message's bytes changed, or a message went | share the core only: the host reaches, identifies, updates and restarts the bridge, and nothing else |
+//! | minor | a new message, at the next code | speak every message both know; a code one end does not know is skipped |
+//! | patch | no message changed | speak the same messages |
+//!
+//! Within a major a message's bytes never change, and no code is reused or renumbered. That
+//! covers the rest of `Ready` and every type a message carries: a new field or enum value is a
+//! major, since postcard cannot read a message shorter or wider than its type. The host's own
+//! version is the bridge firmware its tree builds ([`BRIDGE_VERSION`]), which it never sends: a
+//! bridge needs only the skip rule. [`Standing`] is the rule as a value.
+//! `crates/wartui-proto/tests/link_messages.txt` holds every message's bytes, so a change without
+//! its bump fails a test.
+//!
+//! # The handshake
+//!
+//! - A bridge writes nothing to a USB host until a host frame it decodes arrives, and nothing to
+//!   a central until it subscribes.
+//! - A host sends `Identify` when it opens the link, and may send it at any time. A bridge that
+//!   knows its identity answers each `Identify` with a `Ready`. One still waiting on its C6 at
+//!   boot answers nothing yet, so a host asks until one answers.
+//! - A bridge also sends a `Ready` unasked, when a central subscribes and when a new life begins.
+//!   A host admits nothing that arrives ahead of a connection's first `Ready`.
+//! - **`Identify` is the frame that always counts.** It attaches a USB host, keeps it attached,
+//!   and confirms an image on trial. A bridge serves a USB host for [`HOST_SILENCE_SECS`] after
+//!   its last decoded frame, so a host sends a frozen frame at least that often. A central stays
+//!   attached while it stays subscribed.
+//! - **USB outranks a central.** Over USB an `Identify` is answered without taking the queue from
+//!   a central. An `Update` or a `Reset` takes it, so a wired host always gets in.
+//!
+//! # The update conversation
+//!
+//! Each `Update` carries one op in [`crate::radio_link::update`]'s layout, which is frozen with
+//! the radio link's core, and the P4 answers with `Status` ops. Every refusal is a `Status`. An
+//! op a bridge does not know is skipped with no answer: it names no session to answer for. A
+//! session ends on a taken `Install`, an `Abort`, a `Begin` for another image, a reboot, or the
+//! host going: the USB gate closing, or the central letting go.
+//!
+//! The image is an app image for the P4's spare app slot, 0x7F0000 bytes on every bridge that
+//! carries the core, with its appended SHA-256 digest. A longer one is refused `TooLarge`. The
+//! P4's image carries its C6's, and the P4 updates its C6.
+//!
+//! A bridge boots a new image on trial, and refuses `Begin` while on it. Once its C6 has answered,
+//! a host frame it decodes confirms the image, and `Identify` is one. The third unconfirmed boot
+//! returns to the image before. `Ready` names the outcome: its `image` is the booted image's
+//! digest, and its `trial` says whether that image is confirmed, on trial, or failed its confirm.
+//!
+//! # What an update leaves in place
+//!
+//! An update writes the spare app slot, `otadata` and the `trial` sector, and nothing else. So
+//! every later image runs on the bootloader and partition table of the bridge's last wired flash
+//! (`firmware/p4-bridge/partitions.csv`), finds its slot and `trial` sector by `locate`'s rule in
+//! `firmware/common/src/ota.rs`, reads the sector in [`crate::ota::trial`]'s layout, and leaves
+//! the `nvs` partition's two sectors, the settings and the bonds, as it found them.
+//!
+//! # The rest of the link
 //!
 //! The P4 plans the fleet ([`crate::fleet`]): the host asks it to start or stop scanning
 //! ([`HostToBridge::StartScan`], [`HostToBridge::StopScan`]) and mirrors the plan it reports
@@ -29,11 +131,10 @@
 //! [`crate::bus::UpdateChunk`] from it ([`cache_chunk_body`]), answered like a
 //! [`HostToBridge::ToNode`].
 
-use crate::bus::{DieTemp, MAX_SLOTS, NodeBoard, Slot};
+use crate::bus::{DieTemp, MAX_SLOTS, Slot};
 use crate::fan::{FanDuty, FanStats};
 use crate::fleet::{Member, Report, ScanMode};
 use crate::mac::Mac;
-use crate::ota::image::DIGEST_LEN;
 use crate::plan::{ChannelPool, PlanSettings};
 use crate::radio_link::update::OP_MAX;
 use crate::radio_link::{BleCounters, RadioHealth};
@@ -44,11 +145,16 @@ use serde::Serialize;
 mod bytes;
 mod cache;
 mod frame;
+mod ready;
 
 pub use cache::{NodeImageCache, cache_chunk_body, image_tag};
 pub(crate) use frame::CobsStream;
 pub use frame::{
-    FrameAccumulator, LinkError, crc16, decode_frame, encode_frame, encode_host_frame,
+    BRIDGE_TO_HOST_CODES, FrameAccumulator, HOST_TO_BRIDGE_CODES, LinkError, Reads, crc16,
+    decode_frame, decode_host_frame, encode_frame, encode_host_frame,
+};
+pub use ready::{
+    BRIDGE_VERSION, End, READY_CORE_LEN, Ready, ReadyCore, ReadyRest, Standing, Trial,
 };
 
 /// The host link's baud rate, 8N1, set at both ends.
@@ -57,12 +163,12 @@ pub use frame::{
 /// crystal; `docs/p4-host-uart-findings.md` has the sweep.
 pub const HOST_BAUD: u32 = 4_000_000;
 
-/// The revision of this protocol both ends must agree on.
+/// The frame's version byte: 2, forever. It names the frame, not the messages, which
+/// [`BRIDGE_VERSION`] names.
 ///
-/// Held at 1 until 1.0, whatever the message enums do: both ends are flashed from one tree,
-/// so there is no older peer for it to protect. The cost is that a host and a bridge built
-/// from different trees may meet as an undecodable frame, not a named mismatch.
-pub const LINK_PROTO_VERSION: u8 = 1;
+/// Not 1: a frame from a build without the frozen core carries 1, and its `Ready` puts the first
+/// octet of its address where `core_len` sits, so some addresses would pass as a frozen `Ready`.
+pub const FRAME_VERSION: u8 = 2;
 
 /// The longest body a node sends. A [`crate::bus::SightingBatch`] fills it exactly. The P4
 /// drops a longer record, and counts it in [`BridgeToHost::Status`]'s `rx_oversize`.
@@ -116,14 +222,6 @@ pub const UPDATE_STATUS_MAX: usize = 16;
 
 /// One encoded `Op::Status`, in transit to the host.
 pub type UpdateStatusBytes = Vec<u8, UPDATE_STATUS_MAX>;
-
-/// The P4's [`BridgeToHost::Log`] after a host frame confirms its image on trial.
-/// `wartui flash-bridge` waits for it after an update, so both ends read the text from here.
-pub const IMAGE_CONFIRMED: &str = "image confirmed by the host";
-
-/// The start of the P4's [`BridgeToHost::Error`] when confirming its image fails; the flash
-/// error follows after a colon.
-pub const IMAGE_NOT_CONFIRMED: &str = "could not confirm the image";
 
 /// The P4's [`BridgeToHost::Error`] while no GPS receiver answers on its port, repeated with
 /// every announcement. The simulator sends it too, as a P4 with nothing on the port.
@@ -183,7 +281,7 @@ pub fn split_lines(first: &str, more: &str, text: &str, mut each: impl FnMut(Log
 
 /// What a bridge chip's firmware last marked before it reset.
 ///
-/// Carried across a reset in RTC memory and reported in [`BridgeToHost::Ready`],
+/// Carried across a reset in RTC memory and reported in [`ReadyRest::last_phase`],
 /// because the interesting resets are the ones nobody was watching. It is only a hint. Each
 /// chip's futures share one task and one marker, and the UART link's marks it on every
 /// packet, so it says what ran last, not what stopped the chip. A future parked on an
@@ -233,11 +331,11 @@ pub enum HostToBridge {
     ///
     /// Sent the moment the host opens the port. The P4 writes nothing until a host frame
     /// arrives (`firmware/p4-bridge/src/host.rs`), so a new connection that did not ask would
-    /// wait forever.
+    /// wait forever. Frozen: code 0, no body.
     Identify,
     /// Ask for a [`BridgeToHost::Status`].
     GetStatus,
-    /// Reboot the bridge.
+    /// Reboot the bridge. Frozen: code 2, no body.
     Reset,
     /// Bytes to write verbatim to the GPS receiver, composed by the host.
     ///
@@ -248,10 +346,10 @@ pub enum HostToBridge {
         #[serde(with = "bytes")]
         bytes: GpsWriteBytes,
     },
-    /// One step of an update to a P4 bridge's own image: a `Begin`, `Chunk`, `Commit` or
-    /// `Install` in the [`crate::radio_link::update`] layout, which the P4 answers with a
-    /// [`BridgeToHost::Update`]. The P4 handles the same bytes its C6 does, so one codec
-    /// serves both links. A P4 that refuses updates answers with an [`BridgeToHost::Error`].
+    /// One step of an update to a P4 bridge's own image: a `Begin`, `Chunk`, `Commit`,
+    /// `Install` or `Abort` in the [`crate::radio_link::update`] layout, which the P4 answers
+    /// with a [`BridgeToHost::Update`]. The P4 handles the same bytes its C6 does, so one codec
+    /// serves both links. Every refusal is a `Status`. Frozen: code 4, laid out by hand.
     Update(#[serde(with = "bytes")] UpdateOp),
     /// One record for the node in `slot`, answered by [`BridgeToHost::Delivered`] or
     /// [`BridgeToHost::Undelivered`].
@@ -309,7 +407,8 @@ pub enum HostToBridge {
         pool: ChannelPool,
     },
     /// Scan Wi-Fi, and Bluetooth too when `bluetooth` ([`crate::fleet::Fleet::start`]). The P4
-    /// keeps scanning until a [`HostToBridge::StopScan`], whether or not a host is listening. No
+    /// keeps scanning until a [`HostToBridge::StopScan`], or an update `Begin` it takes for its
+    /// own image ([`HostToBridge::Update`]), whether or not a host is listening. No
     /// answer: a [`BridgeToHost::Fleet`] reports the plan once it changes.
     StartScan {
         /// Give one node the Bluetooth scan, once two nodes are members.
@@ -365,34 +464,8 @@ pub const HOST_SILENCE_SECS: u16 = 15;
 pub enum BridgeToHost {
     /// Sent in answer to [`HostToBridge::Identify`], when a host's first frame arrives, and
     /// when a new life begins while a host is present (`firmware/p4-bridge/src/host.rs`).
-    Ready {
-        /// The bridge's identity: its C6's MAC, or the P4's own while no C6 answers.
-        mac: Mac,
-        /// Bridge firmware version.
-        fw_version: ShortStr,
-        /// Why this life started. Anything but [`ResetCause::PowerOn`] means
-        /// the bridge restarted underneath a host that may not have noticed.
-        reset_cause: ResetCause,
-        /// Where the previous life stopped, when the reset preserved it.
-        last_phase: LoopPhase,
-        /// Milliseconds since this life started, at the moment of announcing.
-        ///
-        /// Lets the host tell a *new* life from a second answer to an
-        /// [`HostToBridge::Identify`] sent twice. A reset of either chip leaves the CH343 on
-        /// the bus, so both arrive on one connection, and nothing else in the frame separates
-        /// them. See `crates/wartui-bridge/src/serial.rs`.
-        uptime_ms: u32,
-        /// What carries the nodes, which the P4 reads at boot. It sets the slots driven and the
-        /// names an operator reads for them.
-        node_board: NodeBoard,
-        /// The ESP32-C6 radio behind the bridge, as the C6 reported it. `None` while the C6
-        /// has not answered.
-        radio: Option<RadioInfo>,
-        /// The digest appended to the P4's booted image ([`crate::ota::image`]). The host reads
-        /// it to tell an installed image from a rollback. `None` when the P4 cannot read one:
-        /// its partition table did not read, or the image carries no appended digest.
-        image: Option<[u8; DIGEST_LEN]>,
-    },
+    /// Frozen: code 0, in [`Ready`]'s layout.
+    Ready(Ready),
     /// Reply to [`HostToBridge::GetStatus`].
     Status {
         /// Node records forwarded since boot. Oversize records are counted in
@@ -466,7 +539,8 @@ pub enum BridgeToHost {
         bytes: GpsBytes,
     },
     /// Where an update to the bridge's own image stands: an `Op::Status` in the
-    /// [`crate::radio_link::update`] layout, answering a [`HostToBridge::Update`].
+    /// [`crate::radio_link::update`] layout, answering a [`HostToBridge::Update`]. Frozen: code
+    /// 5, laid out by hand.
     Update(#[serde(with = "bytes")] UpdateStatusBytes),
     /// A record from the node in `slot`.
     FromNode {

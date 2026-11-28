@@ -13,7 +13,7 @@ use wartui_app::view::{
     SatelliteShown, ScanShown, SdAnswered, SdLogShown, SdShown, SettingsShown, Severity,
     ShareShown, SkyDate, SlotShown, View,
 };
-use wartui_bridge::DisconnectCause;
+use wartui_bridge::{BridgeCore, DisconnectCause};
 use wartui_core::engine::{NodeView, PowerAnswer, SdAnswer, Snapshot};
 use wartui_core::gps::{GpsCounters, GpsStatus, GpsView};
 use wartui_core::nmea::{Constellation, FixMode, Satellite, Sky};
@@ -23,7 +23,10 @@ use wartui_proto::bus::{
 };
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{ScanMode, Share};
-use wartui_proto::link::{Central, PowerOutcome, SdFormatOutcome, SdLog, SdState, SdStatus};
+use wartui_proto::link::{
+    BRIDGE_VERSION, Central, End, PowerOutcome, SdFormatOutcome, SdLog, SdState, SdStatus,
+    Standing, Trial,
+};
 use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun, PlanSettings, Planner, SparseNodes};
 use wartui_proto::reset::ResetCause;
 
@@ -1092,4 +1095,52 @@ fn view_carries_bridge_answers_when_bridge_has_answered() {
     let slot = SlotShown { index: slot.as_u8(), label: "N8".to_owned() };
     assert_eq!(answers.power, Some(PowerAnswered { id: 3, slot, outcome: PowerOutcome::Failed }));
     assert_eq!(answers.sd, Some(SdAnswered { id: 1, outcome: SdFormatOutcome::Busy }));
+}
+
+/// A bridge on `version` reached and read for its core alone, as the engine keeps it.
+fn reached_unread(version: Version) -> Snapshot {
+    let mut snapshot = running(Vec::new());
+    snapshot.bridge = None;
+    snapshot.link_up = false;
+    snapshot.store.dropped = 7;
+    snapshot.incompatible = Some(BridgeCore {
+        mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
+        image: None,
+        version,
+        trial: Trial::Settled,
+        uptime_ms: 400,
+        standing: Standing::of(version, BRIDGE_VERSION, false),
+    });
+    snapshot
+}
+
+#[test]
+fn view_lists_incompatible_bridge_first_when_bridge_is_reached_but_unread() {
+    let older = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+    let faults = usb(&reached_unread(older)).faults;
+    let standing = Standing::Apart { older: End::Host };
+    let first = Fault::BridgeIncompatible { bridge: older, host: BRIDGE_VERSION, standing };
+    assert_eq!(faults, [first, Fault::StoreDropped { rows: 7 }], "in place of a link fault");
+
+    let faults = usb(&reached_unread(BRIDGE_VERSION)).faults;
+    let standing = Standing::OtherBuild;
+    let first =
+        Fault::BridgeIncompatible { bridge: BRIDGE_VERSION, host: BRIDGE_VERSION, standing };
+    assert_eq!(faults[0], first);
+}
+
+#[test]
+fn view_notes_older_end_when_bridge_is_a_minor_apart() {
+    let newer = Version::new(BRIDGE_VERSION.major, BRIDGE_VERSION.minor + 1, 0);
+    let mut snapshot = running(Vec::new());
+    if let Some(bridge) = &mut snapshot.bridge {
+        bridge.version = newer;
+    }
+    let view = usb(&snapshot);
+    let note = Note::BridgeMinorApart { bridge: newer, host: BRIDGE_VERSION, older: End::Host };
+    assert_eq!(view.notes, [note]);
+    assert!(view.faults.is_empty(), "the capture runs: {:?}", view.faults);
+
+    // The same minor says nothing.
+    assert!(usb(&running(Vec::new())).notes.is_empty());
 }

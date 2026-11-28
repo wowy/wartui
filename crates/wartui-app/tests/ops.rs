@@ -6,11 +6,14 @@ use tokio::time::timeout;
 use wartui_app::ops::{self, Cleared, LinkError, NotReady, ReadyWaited, Status};
 use wartui_app::settings::Link;
 use wartui_bridge::sim::{SimConfig, SimTransport};
-use wartui_bridge::{DisconnectCause, LinkEvent, LinkHandle, link_pair};
-use wartui_proto::bus::Slot;
+use wartui_bridge::{BridgeCore, DisconnectCause, LinkEvent, LinkHandle, LinkPlumbing, link_pair};
+use wartui_proto::bus::{Slot, Version};
 use wartui_proto::fan::FanDuty;
 use wartui_proto::fleet::ScanMode;
-use wartui_proto::link::{BridgeToHost, PowerOutcome, QueueStats, RadioLinkStats, SdFormatOutcome};
+use wartui_proto::link::{
+    BRIDGE_VERSION, BridgeToHost, PowerOutcome, QueueStats, RadioLinkStats, SdFormatOutcome,
+    Standing, Trial,
+};
 use wartui_proto::plan::{ChannelPool, PlanSettings};
 
 /// The longest any operation below may take before the test fails rather than hangs.
@@ -271,4 +274,64 @@ async fn ops_status_and_plan_keeps_status_when_it_arrives_late() {
     assert_eq!(status.pool, ChannelPool::Us);
     assert!(plan.is_none(), "no plan came behind it");
     drop(answer.await.expect("the scripted bridge"));
+}
+
+/// The core of a bridge one major past this host's.
+fn other_major() -> BridgeCore {
+    let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+    BridgeCore {
+        mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+        image: None,
+        version,
+        trial: Trial::Settled,
+        uptime_ms: 400,
+        standing: Standing::of(version, BRIDGE_VERSION, false),
+    }
+}
+
+/// What the transport does with a `Ready` whose rest goes unread: the send rule, then the event.
+async fn answer_unread(plumbing: &LinkPlumbing) {
+    plumbing.compatibility.heard(&other_major());
+    let unread = LinkEvent::Incompatible { core: other_major(), fresh: true };
+    plumbing.events.send(unread).await.expect("the link reads");
+}
+
+#[tokio::test(start_paused = true)]
+async fn ops_report_incompatible_when_answer_to_command_queued_before_any_ready_is_unread() {
+    // Nothing was refused up front: no `Ready` had arrived when the status was asked for.
+    let (mut link, plumbing) = link_pair();
+    let mut sink = ignore;
+    let started = tokio::time::Instant::now();
+    let asked = ops::status(&mut link, ops::REPLY_TIMEOUT, &mut sink);
+    let answered = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        answer_unread(&plumbing).await;
+    };
+    let (ended, ()) = tokio::join!(asked, answered);
+    assert!(
+        matches!(ended, Err(LinkError::Incompatible(core)) if core == other_major()),
+        "{ended:?}"
+    );
+    assert_eq!(started.elapsed(), Duration::from_millis(10), "at the answer, not the timeout");
+}
+
+#[tokio::test(start_paused = true)]
+async fn ops_report_incompatible_when_bridge_turns_incompatible_during_a_wait() {
+    // A bridge that reboots into another major while a setting settles, and while the bonds clear
+    // over Bluetooth.
+    let (mut link, plumbing) = link_pair();
+    plumbing.events.send(LinkEvent::Message(status_message(ChannelPool::Us))).await.unwrap();
+    answer_unread(&plumbing).await;
+    let ended = ops::settle(&mut link, Duration::from_secs(1), &mut ignore).await;
+    assert!(matches!(ended, Err(LinkError::Incompatible(_))), "{ended:?}");
+
+    let (mut link, plumbing) = link_pair();
+    let mut sink = ignore;
+    let cleared = ops::clear_bonds(&mut link, Link::Bluetooth, &mut sink);
+    let answered = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        answer_unread(&plumbing).await;
+    };
+    let (ended, ()) = tokio::join!(cleared, answered);
+    assert!(matches!(ended, Err(LinkError::Incompatible(_))), "{ended:?}");
 }

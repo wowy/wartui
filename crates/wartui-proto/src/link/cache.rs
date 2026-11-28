@@ -81,16 +81,22 @@ impl<R: BorrowMut<Receiver>, M: BorrowMut<[u8]>> NodeImageCache<R, M> {
     /// Hand `op` to the receiver, returning the status to send.
     ///
     /// An accepted `Begin` makes its image the one the cache holds. A refused one leaves the
-    /// session, and so its tag, as they were. `Install` is refused with
-    /// [`UpdateState::FlashError`]: a cached image only feeds chunks.
+    /// session, and so its tag, as they were. An `Abort` naming the session drops it and the
+    /// image it filled, tag and all. `Install` is refused with [`UpdateState::FlashError`]: a
+    /// cached image only feeds chunks.
     pub fn take(&mut self, op: Op<'_>) -> Option<UpdateStatus> {
         let begin = match op {
             Op::Begin { session, sha256, .. } => Some((session, image_tag(&sha256))),
             _ => None,
         };
+        let abort = matches!(op, Op::Abort { .. });
         let mut sink = Region(self.region.borrow_mut());
         let slot = (!sink.0.is_empty()).then_some(&mut sink);
-        match receive(self.receiver.borrow_mut(), op, slot, false) {
+        let received = receive(self.receiver.borrow_mut(), op, slot, false);
+        if abort && !self.receiver.borrow().is_active() {
+            self.tag = None;
+        }
+        match received {
             Received::Status(status) => {
                 if let (Some((session, tag)), Some(status)) = (begin, status)
                     && status.session == session

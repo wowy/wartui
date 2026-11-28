@@ -45,7 +45,8 @@
 //! - **the fleet planner** (`src/fleet.rs`) sleeps until its core's next deadline, or until an
 //!   input wakes it, then ticks the core and sends what it owes. It decides what every node
 //!   scans, reading their heartbeats, and authors every `Assign` and `Stop`. It boots stopped, and
-//!   scans from a host's `StartScan` until a `StopScan`, whether or not a host is listening.
+//!   scans from a host's `StartScan` until a `StopScan` or a `Begin` it takes for its own image,
+//!   whether or not a host is listening.
 //!
 //! The settings (`src/settings.rs`) are read from flash once at boot, on every board: the fan's
 //! duty, the channel pool, the WardriveESP setting, the SD log setting, the planner and its sparse
@@ -503,9 +504,9 @@ impl Shared {
     /// Out of line, as each message is, so the two never share a frame.
     #[inline(never)]
     fn push_ready(&self) -> bool {
-        let ready = self.pair.borrow().ready(now_ms());
+        let ready = self.pair.borrow().ready(now_ms(), update::trial(self));
         let Some(ready) = ready else { return false };
-        self.push_host(&ready);
+        self.push_host(&BridgeToHost::Ready(ready));
         true
     }
 

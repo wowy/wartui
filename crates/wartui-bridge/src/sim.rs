@@ -75,21 +75,21 @@ use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Fleet, Report, SlotMsg, ToSlot};
 use wartui_proto::hci::BleTrailer;
 use wartui_proto::link::{
-    BluetoothStatus, BridgeHealth, BridgeToHost, FromNodeBody, HostOwner, HostToBridge, LogStr,
-    LoopPhase, NO_GPS_RECEIVER, NodeImageCache, PowerOutcome, RadioInfo, RadioLinkStats,
-    SdFormatOutcome, SdLog, SdLogState, SdState, SdStatus, UPDATE_STATUS_MAX, Undelivered,
-    UpdateStatusBytes, cache_chunk_body,
+    BRIDGE_VERSION, BluetoothStatus, BridgeHealth, BridgeToHost, FromNodeBody, HostOwner,
+    HostToBridge, LogStr, LoopPhase, NO_GPS_RECEIVER, NodeImageCache, PowerOutcome, RadioInfo,
+    RadioLinkStats, SdFormatOutcome, SdLog, SdLogState, SdState, SdStatus, Trial,
+    UPDATE_STATUS_MAX, Undelivered, UpdateStatusBytes, cache_chunk_body,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::{ASSIGNED_BEAT_MS, CHANNEL_DWELL_MS, IDLE_BEAT_MS};
 use wartui_proto::ota::{Receiver, SectorSink};
 use wartui_proto::plan::{ChannelPool, ChannelSet, NUM_SCAN_CHANNELS, PlanSettings, SCAN_CHANNELS};
 use wartui_proto::radio_link::RadioHealth;
-use wartui_proto::radio_link::update::Op;
+use wartui_proto::radio_link::update::{Op, Received, receive};
 use wartui_proto::reset::ResetCause;
 use wartui_proto::sd::format;
 
-use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
+use crate::{BridgeCore, BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
 
 mod wire;
 pub use wire::{WireDown, WireSim, WireUp};
@@ -621,9 +621,13 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
             last_phase: LoopPhase::Unknown,
             uptime_ms: 0,
         }),
-        // No image to name: it takes no update over the link.
+        // No image to name: it holds no slot to update.
         image: None,
+        version: BRIDGE_VERSION,
+        trial: Trial::Settled,
     };
+    // What it answers each later `Identify` with, its uptime counted from its start.
+    let core = info.core();
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;
     }
@@ -642,6 +646,8 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
 
     let mut rng = Xorshift::new(0x0DD5_EED5);
     let mut cache = sim_cache();
+    // The receiver for its own image, which has no slot to write.
+    let mut own = Box::new(Receiver::new(Board::Esp32p4));
     let mut fan_duty = FanDuty::FULL;
     let mut wardrive_esp = false;
     let mut sd = SimSd::new();
@@ -723,9 +729,17 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 }
                 break 'handled;
             }
+            if let HostToBridge::Identify = cmd {
+                // The same life answering again, as the real bridge's `Ready` reads through the
+                // gate.
+                let again = BridgeCore { uptime_ms: elapsed_ms(started), ..core };
+                if plumbing.events.send(LinkEvent::Again(again)).await.is_err() {
+                    return;
+                }
+                break 'handled;
+            }
             let reply = match cmd {
-                // The real bridge replies with `Ready`, but `Connected` has already
-                // gone out above and a host counting connections would be confused.
+                // Answered above.
                 HostToBridge::Identify => None,
                 // No receiver on its GPS port to write to.
                 HostToBridge::GpsWrite { .. } => None,
@@ -742,10 +756,15 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 HostToBridge::Reset => Some(BridgeToHost::Log {
                     message: LogStr::try_from("simulated reset ignored").unwrap_or_default(),
                 }),
-                // It holds no image to update.
-                HostToBridge::Update(_) => Some(BridgeToHost::Error {
-                    message: LogStr::try_from("this bridge takes no update over its link")
-                        .unwrap_or_default(),
+                // It holds no slot to update, so it refuses as a P4 on a table without one:
+                // with a status. An op it cannot read is skipped, as the P4 skips one.
+                HostToBridge::Update(bytes) => Op::decode(&bytes).and_then(|op| {
+                    match receive::<SimSlot>(&mut own, op, None, false) {
+                        Received::Status(status) => status,
+                        // Nothing is ever verified, so the P4 answers where its receiver stands.
+                        Received::Install(_) => Some(own.status()),
+                    }
+                    .map(update_status)
                 }),
                 HostToBridge::ToNode { slot, id, kind, body } => {
                     Some(match deliver(routes, present, slot, kind, &body, &mut rng).await {
@@ -783,12 +802,10 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                     sd.log_on = on;
                     None
                 }
-                HostToBridge::CacheImage(bytes) => match Op::decode(&bytes) {
-                    Some(op) => cache.take(op).map(cache_status),
-                    None => Some(BridgeToHost::Error {
-                        message: LogStr::try_from("a cache op did not decode").unwrap_or_default(),
-                    }),
-                },
+                // An op it cannot read is skipped, as the P4 skips one.
+                HostToBridge::CacheImage(bytes) => {
+                    Op::decode(&bytes).and_then(|op| cache.take(op)).map(cache_status)
+                }
                 HostToBridge::ToNodeChunk { slot, id, image, session, offset, len } => {
                     if drop_cache_after == Some(0) {
                         cache.reset();
@@ -834,6 +851,13 @@ enum Plan {
     Stop,
     Pool(ChannelPool),
     Planner(PlanSettings),
+}
+
+/// `status` as the bridge answers an update of its own image with it.
+fn update_status(status: UpdateStatus) -> BridgeToHost {
+    let mut buf = [0u8; UPDATE_STATUS_MAX];
+    let len = Op::Status(status).encode(&mut buf);
+    BridgeToHost::Update(UpdateStatusBytes::from_slice(&buf[..len]).unwrap_or_default())
 }
 
 /// `status` as the cache answers it.
@@ -1731,6 +1755,25 @@ mod tests {
         link
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn sim_answers_identify_with_again_when_asked() {
+        let mut link = started().await;
+        let first = link.reached().copied().expect("the announcement's core");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        link.send_bulk(HostToBridge::Identify).expect("queued");
+        let again = loop {
+            match link.recv().await {
+                Some(LinkEvent::Again(core)) => break core,
+                Some(LinkEvent::Connected(_)) => panic!("a repeat is not a new life"),
+                Some(_) => {}
+                None => panic!("the simulator stopped"),
+            }
+        };
+        assert_eq!(again.mac, first.mac);
+        assert!(again.uptime_ms >= 2_000, "the same life, later: {}", again.uptime_ms);
+        assert_eq!(link.reached(), Some(&again));
+    }
+
     fn cache_op(link: &LinkHandle, op: &Op<'_>) {
         let mut buf = [0u8; wartui_proto::radio_link::update::OP_MAX];
         let len = op.encode(&mut buf);
@@ -1779,6 +1822,43 @@ mod tests {
                 None => panic!("the link closed"),
             }
         }
+    }
+
+    /// The status the bridge answers an update of its own image with, after sending it `op`.
+    async fn update_answer(link: &mut LinkHandle, op: &Op<'_>) -> UpdateStatus {
+        let mut buf = [0u8; wartui_proto::radio_link::update::OP_MAX];
+        let len = op.encode(&mut buf);
+        let op = wartui_proto::link::UpdateOp::from_slice(&buf[..len]).expect("an op fits");
+        link.send_urgent(HostToBridge::Update(op)).expect("queued");
+        loop {
+            match link.recv().await {
+                Some(LinkEvent::Message(BridgeToHost::Update(bytes))) => {
+                    let Some(Op::Status(status)) = Op::decode(&bytes) else { panic!("a status") };
+                    return status;
+                }
+                Some(LinkEvent::Message(BridgeToHost::Error { message }))
+                    if message.as_str() != NO_GPS_RECEIVER =>
+                {
+                    panic!("refused with an error: {message}")
+                }
+                Some(_) => {}
+                None => panic!("the link closed"),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sim_answers_update_with_status_when_it_holds_no_slot() {
+        // As a P4 on a table with no slot to write: every refusal is a status.
+        let mut link = started().await;
+        let (bytes, sha256) = cache_image();
+        let len = u32::try_from(bytes.len()).expect("a small image");
+        let begin = update_answer(&mut link, &Op::Begin { session: 3, len, sha256 }).await;
+        assert_eq!((begin.session, begin.state), (3, UpdateState::FlashError));
+        let commit = update_answer(&mut link, &Op::Commit { session: 3 }).await;
+        assert_eq!((commit.session, commit.state), (3, UpdateState::Idle));
+        let abort = update_answer(&mut link, &Op::Abort { session: 3 }).await;
+        assert_eq!((abort.session, abort.state, abort.next_offset), (3, UpdateState::Idle, 0));
     }
 
     #[tokio::test(start_paused = true)]

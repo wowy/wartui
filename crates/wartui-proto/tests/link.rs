@@ -6,6 +6,7 @@
 
 use heapless::{String, Vec};
 use wartui_proto::ChannelPool;
+use wartui_proto::bus::Version;
 use wartui_proto::bus::{
     Assign, Board, Capabilities, DieTemp, DownType, Heartbeat, NodeBoard, NodeBus, RecordKind,
     Security, SightingBatchWriter, SightingMsg, Slot, UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType,
@@ -14,13 +15,14 @@ use wartui_proto::bus::{
 use wartui_proto::fan::{FanDuty, FanStats};
 use wartui_proto::fleet::{Member, Report, ScanMode, Share};
 use wartui_proto::link::{
-    BluetoothStatus, BridgeHealth, BridgeToHost, Central, FrameAccumulator, FromNodeBody,
-    GPS_FRAME, GPS_WRITE_MAX, GpsBytes, GpsWriteBytes, HostOwner, HostToBridge, LINK_PROTO_VERSION,
-    LinkError, LoopPhase, MAX_FRAME, MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PairWindow,
-    PowerOutcome, QueueId, QueueStat, QueueStats, RadioInfo, RadioLinkStats, SdFormatOutcome,
-    SdLog, SdLogState, SdState, SdStatus, ToNodeBody, UPDATE_STATUS_MAX, Undelivered, UpdateOp,
-    UpdateStatusBytes, cache_chunk_body, crc16, decode_frame, encode_frame, encode_host_frame,
-    image_tag,
+    BRIDGE_TO_HOST_CODES, BRIDGE_VERSION, BluetoothStatus, BridgeHealth, BridgeToHost, Central,
+    FRAME_VERSION, FrameAccumulator, FromNodeBody, GPS_FRAME, GPS_WRITE_MAX, GpsBytes,
+    GpsWriteBytes, HOST_TO_BRIDGE_CODES, HostOwner, HostToBridge, LinkError, LoopPhase, MAX_FRAME,
+    MAX_HOST_FRAME, MAX_NODE_DOWN, MAX_NODE_PAYLOAD, PairWindow, PowerOutcome, QueueId, QueueStat,
+    QueueStats, RadioInfo, RadioLinkStats, Reads, Ready, ReadyCore, ReadyRest, SdFormatOutcome,
+    SdLog, SdLogState, SdState, SdStatus, ToNodeBody, Trial, UPDATE_STATUS_MAX, Undelivered,
+    UpdateOp, UpdateStatusBytes, cache_chunk_body, crc16, decode_frame, decode_host_frame,
+    encode_frame, encode_host_frame, image_tag,
 };
 use wartui_proto::plan::{PlanSettings, Planner, SparseNodes};
 use wartui_proto::radio_link::update::{OP_MAX, Op};
@@ -109,7 +111,25 @@ fn encoded_status(status: UpdateStatus) -> UpdateStatusBytes {
     UpdateStatusBytes::from_slice(&buf[..len]).expect("a status fits")
 }
 
-/// The postcard bytes between a frame's version byte and its CRC.
+/// The version the sample `Ready`s carry: this build's major, so their rest reads, and a minor
+/// and patch of their own, so a minor bump leaves their bytes in `link_messages.txt` alone.
+const SAMPLE_VERSION: Version = Version::new(BRIDGE_VERSION.major, 0, 0);
+
+fn sample_ready(core: ReadyCore, rest: ReadyRest) -> Ready {
+    Ready { core, rest: Some(rest) }
+}
+
+/// A host frame of a code this build knows, decoded.
+fn decode_host(frame: &mut [u8]) -> Result<HostToBridge, LinkError> {
+    decode_host_frame(frame).map(|msg| msg.expect("a code this build knows"))
+}
+
+/// A bridge frame of a code this build knows, decoded with every message read.
+fn decode_bridge(frame: &mut [u8]) -> Result<BridgeToHost, LinkError> {
+    decode_frame(frame, Reads::All).map(|msg| msg.expect("a code this build knows"))
+}
+
+/// The bytes between a frame's version byte and its CRC: the message's code, then its body.
 fn frame_body(frame: &[u8]) -> std::vec::Vec<u8> {
     let mut decoded = frame.to_vec();
     let len = cobs::decode_in_place(&mut decoded[..frame.len() - 1]).expect("valid cobs");
@@ -145,31 +165,49 @@ fn sample_events() -> Vec<BridgeToHost, 32> {
     };
 
     let mut v = Vec::new();
-    v.push(BridgeToHost::Ready {
-        mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x60],
-        fw_version: String::try_from("0.1.0").expect("short"),
-        // Not the defaults: a round trip that only ever carried the zero
-        // variant of an enum would pass just as well with the field dropped.
-        reset_cause: ResetCause::Watchdog,
-        last_phase: LoopPhase::Command,
-        uptime_ms: 8_675_309,
-        node_board: NodeBoard::NoCarrier,
-        radio: None,
-        image: None,
-    })
+    v.push(BridgeToHost::Ready(sample_ready(
+        ReadyCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+            image: [0; 32],
+            version: SAMPLE_VERSION,
+            trial: Trial::Settled,
+            uptime_ms: 8_675_309,
+        },
+        ReadyRest {
+            fw_version: String::try_from("0.1.0").expect("short"),
+            // Not the defaults: a round trip that only ever carried the zero
+            // variant of an enum would pass just as well with the field dropped.
+            reset_cause: ResetCause::Watchdog,
+            last_phase: LoopPhase::Command,
+            node_board: NodeBoard::NoCarrier,
+            radio: None,
+        },
+    )))
     .expect("sample_events has room");
     // A second one, because `Option` and the enums the first case does not reach are the
     // fields a round trip would otherwise pass on without carrying.
-    v.push(BridgeToHost::Ready {
-        mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x61],
-        fw_version: String::try_from("0.1.0").expect("short"),
-        reset_cause: ResetCause::Lockup,
-        last_phase: LoopPhase::Pump,
-        uptime_ms: 1_000,
-        node_board: NodeBoard::Carrier14,
-        radio: None,
-        image: Some([0xD1; 32]),
-    })
+    v.push(BridgeToHost::Ready(sample_ready(
+        ReadyCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC1],
+            image: [0xD1; 32],
+            version: SAMPLE_VERSION,
+            trial: Trial::ConfirmFailed,
+            uptime_ms: 1_000,
+        },
+        ReadyRest {
+            fw_version: String::try_from("0.1.0").expect("short"),
+            reset_cause: ResetCause::Lockup,
+            last_phase: LoopPhase::Pump,
+            node_board: NodeBoard::Carrier14,
+            radio: Some(RadioInfo {
+                mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC2],
+                fw_version: String::try_from("0.1.1").expect("short"),
+                reset_cause: ResetCause::Watchdog,
+                last_phase: LoopPhase::RadioLink,
+                uptime_ms: 77,
+            }),
+        },
+    )))
     .expect("sample_events has room");
     v.push(BridgeToHost::FromNode {
         slot: Slot::new(0, 0).expect("A1"),
@@ -233,6 +271,10 @@ fn sample_events() -> Vec<BridgeToHost, 32> {
     .expect("sample_events has room");
     v.push(BridgeToHost::Log {
         message: String::try_from("bus A slot 3 answered").expect("short"),
+    })
+    .expect("sample_events has room");
+    v.push(BridgeToHost::Error {
+        message: String::try_from("the radio coprocessor is not answering").expect("short"),
     })
     .expect("sample_events has room");
     v.push(BridgeToHost::Gps { bytes: GpsBytes::from_slice(b"$GNGGA,").expect("fits") })
@@ -370,8 +412,7 @@ fn link_codec_round_trips_all_host_commands_when_encoded_and_decoded() {
     for cmd in sample_commands() {
         let mut out = [0u8; MAX_FRAME];
         let n = encode_host_frame(&cmd, &mut out).expect("encodes");
-        let decoded: HostToBridge =
-            decode_frame(&mut out[..n - 1]).expect("decodes without the terminator");
+        let decoded = decode_host(&mut out[..n - 1]).expect("decodes without the terminator");
         assert_eq!(decoded, cmd);
     }
 }
@@ -381,7 +422,7 @@ fn link_codec_round_trips_all_bridge_events_when_encoded_and_decoded() {
     for event in sample_events() {
         let mut out = [0u8; MAX_FRAME];
         let n = encode_frame(&event, &mut out).expect("encodes");
-        let decoded: BridgeToHost = decode_frame(&mut out[..n - 1]).expect("decodes");
+        let decoded = decode_bridge(&mut out[..n - 1]).expect("decodes");
         assert_eq!(decoded, event);
     }
 }
@@ -407,7 +448,7 @@ fn link_decoder_rejects_frame_when_payload_checksum_is_corrupted() {
     // Flip a bit in the body, avoiding the COBS length marker and terminator.
     let mut damaged = out;
     damaged[2] ^= 0x01;
-    match decode_frame::<HostToBridge>(&mut damaged[..n - 1]) {
+    match decode_host(&mut damaged[..n - 1]) {
         Err(LinkError::BadChecksum { .. } | LinkError::Malformed | LinkError::Corrupt) => {}
         other => panic!("corruption slipped through as {other:?}"),
     }
@@ -425,17 +466,17 @@ fn link_decoder_rejects_frame_when_protocol_version_mismatches() {
     let mut decoded = out;
     let len = cobs::decode_in_place(&mut decoded[..n - 1]).expect("valid cobs");
     body[..len].copy_from_slice(&decoded[..len]);
-    body[0] = LINK_PROTO_VERSION.wrapping_add(1);
+    body[0] = FRAME_VERSION.wrapping_add(1);
     let crc = crc16(&body[..len - 2]);
     body[len - 2..len].copy_from_slice(&crc.to_le_bytes());
 
     let mut reframed = [0u8; MAX_FRAME];
     let encoded = cobs::try_encode(&body[..len], &mut reframed).expect("fits");
     assert_eq!(
-        decode_frame::<HostToBridge>(&mut reframed[..encoded]),
+        decode_host_frame(&mut reframed[..encoded]),
         Err(LinkError::VersionMismatch {
-            ours: LINK_PROTO_VERSION,
-            theirs: LINK_PROTO_VERSION.wrapping_add(1)
+            ours: FRAME_VERSION,
+            theirs: FRAME_VERSION.wrapping_add(1)
         })
     );
 }
@@ -454,7 +495,7 @@ fn frame_accumulator_delivers_sequential_frames_when_processing_continuous_strea
     let mut got = std::vec::Vec::new();
     for byte in stream {
         if let Some(frame) = acc.push(byte) {
-            got.push(decode_frame::<HostToBridge>(frame).expect("decodes"));
+            got.push(decode_host(frame).expect("decodes"));
         }
     }
     assert_eq!(got, cmds.into_iter().collect::<std::vec::Vec<_>>());
@@ -480,7 +521,7 @@ fn frame_accumulator_resynchronizes_cleanly_when_stream_contains_bootloader_nois
         if let Some(frame) = acc.push(byte) {
             // The banner has no terminator, so it is still buffered ahead of
             // our frame and must fail rather than decode as something.
-            if let Ok(msg) = decode_frame::<HostToBridge>(frame) {
+            if let Ok(msg) = decode_host(frame) {
                 got.push(msg);
             }
         }
@@ -491,7 +532,7 @@ fn frame_accumulator_resynchronizes_cleanly_when_stream_contains_bootloader_nois
     let mut got = std::vec::Vec::new();
     for byte in out[..n].iter().copied() {
         if let Some(frame) = acc.push(byte) {
-            got.push(decode_frame::<HostToBridge>(frame).expect("decodes"));
+            got.push(decode_host(frame).expect("decodes"));
         }
     }
     assert_eq!(got, std::vec![cmd]);
@@ -509,7 +550,7 @@ fn frame_accumulator_ignores_leading_zeros_when_accumulating_stream() {
     let mut got = None;
     for byte in out[..n].iter().copied() {
         if let Some(frame) = acc.push(byte) {
-            got = Some(decode_frame::<HostToBridge>(frame).expect("decodes"));
+            got = Some(decode_host(frame).expect("decodes"));
         }
     }
     assert_eq!(got, Some(cmd));
@@ -530,7 +571,7 @@ fn frame_accumulator_discards_oversized_frame_when_capacity_is_exceeded() {
     let mut got = None;
     for byte in out[..n].iter().copied() {
         if let Some(frame) = acc.push(byte) {
-            got = Some(decode_frame::<HostToBridge>(frame).expect("decodes"));
+            got = Some(decode_host(frame).expect("decodes"));
         }
     }
     assert_eq!(got, Some(cmd));
@@ -553,7 +594,7 @@ fn frame_accumulator_decodes_following_frame_when_truncated_frame_is_terminated(
     let mut got = std::vec::Vec::new();
     for byte in stream {
         if let Some(frame) = acc.push(byte)
-            && let Ok(msg) = decode_frame::<HostToBridge>(frame)
+            && let Ok(msg) = decode_host(frame)
         {
             got.push(msg);
         }
@@ -601,7 +642,7 @@ fn after_banner(delimited: bool) -> std::vec::Vec<BridgeToHost> {
     let mut got = std::vec::Vec::new();
     for byte in stream {
         if let Some(frame) = acc.push(byte)
-            && let Ok(msg) = decode_frame::<BridgeToHost>(frame)
+            && let Ok(msg) = decode_bridge(frame)
         {
             got.push(msg);
         }
@@ -625,9 +666,9 @@ fn frame_accumulator_decodes_first_frame_when_overlong_banner_is_delimited() {
 #[test]
 fn link_decoder_rejects_payload_when_frame_is_truncated() {
     let mut empty: [u8; 0] = [];
-    assert!(decode_frame::<HostToBridge>(&mut empty).is_err());
+    assert!(decode_host(&mut empty).is_err());
     let mut tiny = [1u8, 2];
-    assert!(decode_frame::<HostToBridge>(&mut tiny).is_err());
+    assert!(decode_host(&mut tiny).is_err());
 }
 
 #[test]
@@ -647,7 +688,7 @@ fn link_round_trips_to_node_when_body_is_full() {
     let mut decoded = None;
     for &byte in &out[..n] {
         if let Some(frame) = acc.push(byte) {
-            decoded = Some(decode_frame::<HostToBridge>(frame).expect("decodes"));
+            decoded = Some(decode_host(frame).expect("decodes"));
         }
     }
     assert_eq!(decoded, Some(cmd));
@@ -672,7 +713,7 @@ fn link_round_trips_from_node_when_body_is_full_and_has_no_zeros() {
     let mut decoded = None;
     for &byte in &out[..n] {
         if let Some(frame) = acc.push(byte) {
-            decoded = Some(decode_frame::<BridgeToHost>(frame).expect("decodes"));
+            decoded = Some(decode_bridge(frame).expect("decodes"));
         }
     }
     assert_eq!(decoded, Some(event));
@@ -747,7 +788,7 @@ fn link_round_trips_gps_when_frame_is_full() {
         BridgeToHost::Gps { bytes: GpsBytes::from_slice(&[0xFF; GPS_FRAME]).expect("fits") };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&event, &mut out).expect("encodes");
-    let decoded: BridgeToHost = decode_frame(&mut out[..n - 1]).expect("decodes");
+    let decoded = decode_bridge(&mut out[..n - 1]).expect("decodes");
     assert_eq!(decoded, event);
 }
 
@@ -758,7 +799,7 @@ fn link_round_trips_gps_write_when_bytes_are_full() {
     };
     let mut out = [0u8; MAX_HOST_FRAME];
     let n = encode_host_frame(&cmd, &mut out).expect("encodes");
-    let decoded: HostToBridge = decode_frame(&mut out[..n - 1]).expect("decodes");
+    let decoded = decode_host(&mut out[..n - 1]).expect("decodes");
     assert_eq!(decoded, cmd);
 }
 
@@ -785,14 +826,14 @@ fn link_round_trips_status_when_rx_oversize_is_set() {
     };
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(&status, &mut out).expect("encodes");
-    let decoded: BridgeToHost = decode_frame(&mut out[..n - 1]).expect("decodes");
+    let decoded = decode_bridge(&mut out[..n - 1]).expect("decodes");
     assert_eq!(decoded, status);
 }
 
 fn round_trip(event: &BridgeToHost) -> BridgeToHost {
     let mut out = [0u8; MAX_FRAME];
     let n = encode_frame(event, &mut out).expect("encodes");
-    decode_frame(&mut out[..n - 1]).expect("decodes")
+    decode_bridge(&mut out[..n - 1]).expect("decodes")
 }
 
 #[test]
@@ -883,22 +924,28 @@ fn link_fits_status_in_one_frame_when_every_field_is_largest() {
 
 #[test]
 fn link_round_trips_ready_with_radio() {
-    let ready = BridgeToHost::Ready {
-        mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x62],
-        fw_version: String::try_from("0.1.0").expect("short"),
-        reset_cause: ResetCause::PowerOn,
-        last_phase: LoopPhase::RadioLink,
-        uptime_ms: 2,
-        node_board: NodeBoard::Carrier10,
-        radio: Some(RadioInfo {
-            mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x63],
-            fw_version: String::try_from("0.1.1").expect("short"),
-            reset_cause: ResetCause::Watchdog,
-            last_phase: LoopPhase::Command,
-            uptime_ms: u32::MAX,
-        }),
-        image: Some([0xA5; 32]),
-    };
+    let ready = BridgeToHost::Ready(sample_ready(
+        ReadyCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC3],
+            image: [0xA5; 32],
+            version: BRIDGE_VERSION,
+            trial: Trial::OnTrial,
+            uptime_ms: 2,
+        },
+        ReadyRest {
+            fw_version: String::try_from("0.1.0").expect("short"),
+            reset_cause: ResetCause::PowerOn,
+            last_phase: LoopPhase::RadioLink,
+            node_board: NodeBoard::Carrier10,
+            radio: Some(RadioInfo {
+                mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC4],
+                fw_version: String::try_from("0.1.1").expect("short"),
+                reset_cause: ResetCause::Watchdog,
+                last_phase: LoopPhase::Command,
+                uptime_ms: u32::MAX,
+            }),
+        },
+    ));
     assert_eq!(round_trip(&ready), ready);
 }
 
@@ -1243,7 +1290,7 @@ fn link_round_trips_set_sd_log_when_encoded() {
         let cmd = HostToBridge::SetSdLog { on };
         let n = encode_host_frame(&cmd, &mut out).expect("encodes");
         assert_eq!(frame_body(&out[..n]), [17, byte]);
-        let decoded: HostToBridge = decode_frame(&mut out[..n - 1]).expect("decodes");
+        let decoded = decode_host(&mut out[..n - 1]).expect("decodes");
         assert_eq!(decoded, cmd);
     }
 }
@@ -1318,7 +1365,7 @@ fn link_codec_pins_set_planner_bytes_when_host_sets_a_planner() {
         let cmd = HostToBridge::SetPlanner { planner };
         let n = encode_host_frame(&cmd, &mut out).expect("encodes");
         assert_eq!(frame_body(&out[..n]), bytes, "{planner:?}");
-        let decoded: HostToBridge = decode_frame(&mut out[..n - 1]).expect("decodes");
+        let decoded = decode_host(&mut out[..n - 1]).expect("decodes");
         assert_eq!(decoded, cmd);
     }
 }
@@ -1376,7 +1423,7 @@ fn link_round_trips_set_wardrive_esp_when_encoded() {
         let cmd = HostToBridge::SetWardriveEsp { on };
         let n = encode_host_frame(&cmd, &mut out).expect("encodes");
         assert_eq!(frame_body(&out[..n]), [15, byte]);
-        let decoded: HostToBridge = decode_frame(&mut out[..n - 1]).expect("decodes");
+        let decoded = decode_host(&mut out[..n - 1]).expect("decodes");
         assert_eq!(decoded, cmd);
     }
 }
@@ -1426,10 +1473,19 @@ fn link_codec_pins_power_cycled_bytes_when_bridge_answers() {
     }
 }
 
+/// The first sample `Ready`, with its rest's `node_board` replaced.
+fn ready_on(board: NodeBoard) -> BridgeToHost {
+    let mut ready = sample_events().into_iter().next().expect("Ready is first");
+    if let BridgeToHost::Ready(Ready { rest: Some(rest), .. }) = &mut ready {
+        rest.node_board = board;
+    }
+    ready
+}
+
 #[test]
-fn link_codec_pins_node_board_ahead_of_radio_and_image_when_ready_is_encoded() {
-    // The sample has no radio and no image, so `node_board`'s byte is followed only by their
-    // two `None` tags.
+fn link_codec_pins_node_board_ahead_of_radio_when_ready_is_encoded() {
+    // The sample has no radio, so the rest's `node_board` byte is followed only by its `None`
+    // tag.
     let mut out = [0u8; MAX_FRAME];
     for (board, code) in [
         (NodeBoard::NoCarrier, 0),
@@ -1437,24 +1493,23 @@ fn link_codec_pins_node_board_ahead_of_radio_and_image_when_ready_is_encoded() {
         (NodeBoard::Carrier10, 2),
         (NodeBoard::Carrier14, 3),
     ] {
-        let mut ready = sample_events().into_iter().next().expect("Ready is first");
-        if let BridgeToHost::Ready { node_board, .. } = &mut ready {
-            *node_board = board;
-        }
-        let n = encode_frame(&ready, &mut out).expect("encodes");
-        assert_eq!(frame_body(&out[..n]).last_chunk(), Some(&[code, 0, 0]), "{board:?}");
+        let n = encode_frame(&ready_on(board), &mut out).expect("encodes");
+        assert_eq!(frame_body(&out[..n]).last_chunk(), Some(&[code, 0]), "{board:?}");
     }
 }
 
 #[test]
-fn link_refuses_ready_when_node_board_byte_names_none() {
+fn link_leaves_rest_unread_when_node_board_byte_names_none() {
     let ready = sample_events().into_iter().next().expect("Ready is first");
-    let mut buf = [0u8; MAX_FRAME];
-    let mut bytes = postcard::to_slice(&ready, &mut buf).expect("encodes").to_vec();
-    // `node_board`, ahead of the radio's and the image's `None` tags.
-    let at = bytes.len() - 3;
-    bytes[at] = 4;
-    assert!(postcard::from_bytes::<BridgeToHost>(&bytes).is_err());
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&ready, &mut out).expect("encodes");
+    let mut message = frame_body(&out[..n]);
+    // `node_board`, ahead of the radio's `None` tag.
+    let at = message.len() - 2;
+    message[at] = 4;
+    let BridgeToHost::Ready(expected) = ready else { unreachable!() };
+    let read = decode_bridge(&mut framed(FRAME_VERSION, &message)).expect("the core reads");
+    assert_eq!(read, BridgeToHost::Ready(Ready { core: expected.core, rest: None }));
 }
 
 #[test]
@@ -1470,7 +1525,7 @@ fn link_round_trips_update_when_op_is_a_full_chunk() {
     let mut decoded = None;
     for &byte in &out[..n] {
         if let Some(frame) = acc.push(byte) {
-            decoded = Some(decode_frame::<HostToBridge>(frame).expect("decodes"));
+            decoded = Some(decode_host(frame).expect("decodes"));
         }
     }
     assert_eq!(decoded, Some(cmd));
@@ -1478,17 +1533,26 @@ fn link_round_trips_update_when_op_is_a_full_chunk() {
 
 #[test]
 fn link_round_trips_ready_when_image_is_present_or_absent() {
-    for image in [None, Some([0x5A; 32])] {
-        let ready = BridgeToHost::Ready {
-            mac: [0x10, 0x20, 0x30, 0x40, 0x50, 0x62],
-            fw_version: String::try_from("0.1.0").expect("short"),
-            reset_cause: ResetCause::Software,
-            last_phase: LoopPhase::Boot,
-            uptime_ms: 3,
-            node_board: NodeBoard::Carrier6,
-            radio: None,
-            image,
+    for image in [[0; 32], [0x5A; 32]] {
+        let ready = Ready {
+            core: ReadyCore {
+                mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC3],
+                image,
+                version: BRIDGE_VERSION,
+                trial: Trial::Settled,
+                uptime_ms: 3,
+            },
+            rest: Some(ReadyRest {
+                fw_version: String::try_from("0.1.0").expect("short"),
+                reset_cause: ResetCause::Software,
+                last_phase: LoopPhase::Boot,
+                node_board: NodeBoard::Carrier6,
+                radio: None,
+            }),
         };
+        // Zeros name no image.
+        assert_eq!(ready.core.image(), (image != [0; 32]).then_some(image));
+        let ready = BridgeToHost::Ready(ready);
         assert_eq!(round_trip(&ready), ready);
     }
 }
@@ -1498,7 +1562,7 @@ fn link_tonodechunk_round_trips_through_postcard() {
     let cmd = sample_chunk_command();
     let mut out = [0u8; MAX_HOST_FRAME];
     let n = encode_host_frame(&cmd, &mut out).expect("encodes");
-    let decoded: HostToBridge = decode_frame(&mut out[..n - 1]).expect("decodes");
+    let decoded = decode_host(&mut out[..n - 1]).expect("decodes");
     assert_eq!(decoded, cmd);
 }
 
@@ -1526,7 +1590,7 @@ fn link_cacheimage_round_trips() {
     let mut decoded = None;
     for &byte in &out[..n] {
         if let Some(frame) = acc.push(byte) {
-            decoded = Some(decode_frame::<HostToBridge>(frame).expect("decodes"));
+            decoded = Some(decode_host(frame).expect("decodes"));
         }
     }
     assert_eq!(decoded, Some(cmd));
@@ -1651,4 +1715,498 @@ fn split_lines_gives_prefix_alone_when_text_empty() {
     let mut lines = std::vec::Vec::new();
     wartui_proto::link::split_lines("first: ", "more: ", "", |line| lines.push(line));
     assert_eq!(lines, ["first: "]);
+}
+
+/// `message`, the bytes after a frame's version byte, framed under `version` without the
+/// terminator, as a decoder takes it.
+fn framed(version: u8, message: &[u8]) -> std::vec::Vec<u8> {
+    let mut body = std::vec![version];
+    body.extend_from_slice(message);
+    let crc = crc16(&body);
+    body.extend_from_slice(&crc.to_le_bytes());
+    let mut out = std::vec![0; body.len() + body.len() / 254 + 2];
+    let len = cobs::encode(&body, &mut out);
+    out.truncate(len);
+    out
+}
+
+/// A `Ready`'s core for the pins below, every field distinct.
+fn pinned_core() -> ReadyCore {
+    ReadyCore {
+        mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+        image: core::array::from_fn(|i| 0xA0 + i as u8),
+        version: Version::new(3, 4, 5),
+        trial: Trial::OnTrial,
+        uptime_ms: 0x0403_0201,
+    }
+}
+
+/// [`pinned_core`]'s message, spelled out field by field.
+const PINNED_CORE: [u8; 48] = [
+    0,  // code: Ready
+    46, // core_len
+    0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0, // mac
+    0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, // image
+    0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, //
+    0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, //
+    0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, //
+    3, 4, 5, // version: major, minor, patch
+    1, // trial: on trial
+    0x01, 0x02, 0x03, 0x04, // uptime_ms
+];
+
+/// The rest the frozen-core tests carry.
+fn pinned_rest() -> ReadyRest {
+    ReadyRest {
+        fw_version: String::try_from("9.9.9").expect("short"),
+        reset_cause: ResetCause::Brownout,
+        last_phase: LoopPhase::Pump,
+        node_board: NodeBoard::Carrier14,
+        radio: None,
+    }
+}
+
+/// A `Ready` message: `core_len`, then `core` laid out under it with `extra` bytes appended,
+/// then `rest`.
+fn ready_message(core: &ReadyCore, extra: &[u8], rest: &[u8]) -> std::vec::Vec<u8> {
+    let mut out = [0u8; MAX_FRAME];
+    let ready = Ready { core: *core, rest: None };
+    let n = encode_frame(&BridgeToHost::Ready(ready), &mut out).expect("encodes");
+    let mut message = frame_body(&out[..n]);
+    message[1] += u8::try_from(extra.len()).expect("a short extra");
+    message.extend_from_slice(extra);
+    message.extend_from_slice(rest);
+    message
+}
+
+fn rest_bytes(rest: &ReadyRest) -> std::vec::Vec<u8> {
+    let mut buf = [0u8; 128];
+    postcard::to_slice(rest, &mut buf).expect("fits").to_vec()
+}
+
+/// What this build reads of a `Ready` message.
+fn read_ready(message: &[u8]) -> Result<Ready, LinkError> {
+    match decode_frame(&mut framed(FRAME_VERSION, message), Reads::All)? {
+        Some(BridgeToHost::Ready(ready)) => Ok(ready),
+        other => panic!("not a Ready: {other:?}"),
+    }
+}
+
+#[test]
+fn link_codec_pins_ready_core_when_encoded() {
+    let ready = Ready { core: pinned_core(), rest: Some(pinned_rest()) };
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&BridgeToHost::Ready(ready), &mut out).expect("encodes");
+    let message = frame_body(&out[..n]);
+    assert_eq!(message[..PINNED_CORE.len()], PINNED_CORE);
+    // The rest starts at `1 + core_len`, past the code.
+    assert_eq!(message[PINNED_CORE.len()..], rest_bytes(&pinned_rest()));
+}
+
+#[test]
+fn link_codec_pins_frozen_messages_when_encoded() {
+    let host = |cmd: &HostToBridge| {
+        let mut out = [0u8; MAX_HOST_FRAME];
+        let n = encode_host_frame(cmd, &mut out).expect("encodes");
+        frame_body(&out[..n])
+    };
+    assert_eq!(host(&HostToBridge::Identify), [0]);
+    assert_eq!(host(&HostToBridge::Reset), [2]);
+    let commit = HostToBridge::Update(encoded_op(&Op::Commit { session: 0x42 }));
+    assert_eq!(host(&commit), [4, 2, 3, 0x42]);
+    // A full chunk's op runs past 127 bytes, so its length takes two LEB128 bytes.
+    let data = [0x11; UPDATE_CHUNK];
+    let chunk = HostToBridge::Update(encoded_op(&Op::Chunk { session: 1, offset: 0, data: &data }));
+    assert_eq!(host(&chunk)[..4], [4, 0x86, 0x08, 2]);
+
+    let status =
+        UpdateStatus { session: 0x42, state: UpdateState::Verified, next_offset: 0x0001_2000 };
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&BridgeToHost::Update(encoded_status(status)), &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), [5, 7, 5, 0x42, 2, 0x00, 0x20, 0x01, 0x00]);
+    let ready = BridgeToHost::Ready(Ready { core: pinned_core(), rest: None });
+    let n = encode_frame(&ready, &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), PINNED_CORE);
+}
+
+#[test]
+fn link_decoder_reads_frozen_messages_when_laid_out_by_hand() {
+    let host = |message: &[u8]| decode_host_frame(&mut framed(FRAME_VERSION, message));
+    assert_eq!(host(&[0]), Ok(Some(HostToBridge::Identify)));
+    assert_eq!(host(&[2]), Ok(Some(HostToBridge::Reset)));
+    let commit = encoded_op(&Op::Commit { session: 0x42 });
+    assert_eq!(host(&[4, 2, 3, 0x42]), Ok(Some(HostToBridge::Update(commit))));
+    let status =
+        UpdateStatus { session: 0x42, state: UpdateState::Verified, next_offset: 0x0001_2000 };
+    let event = decode_frame(
+        &mut framed(FRAME_VERSION, &[5, 7, 5, 0x42, 2, 0x00, 0x20, 0x01, 0x00]),
+        Reads::Core,
+    );
+    assert_eq!(event, Ok(Some(BridgeToHost::Update(encoded_status(status)))));
+    assert_eq!(read_ready(&PINNED_CORE), Ok(Ready { core: pinned_core(), rest: None }));
+}
+
+#[test]
+fn link_codec_encodes_no_other_message_to_a_frozen_code_when_samples_are_encoded() {
+    for cmd in sample_commands() {
+        let mut out = [0u8; MAX_HOST_FRAME];
+        let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+        let frozen =
+            matches!(cmd, HostToBridge::Identify | HostToBridge::Reset | HostToBridge::Update(_));
+        assert_eq!(frozen, [0, 2, 4].contains(&frame_body(&out[..n])[0]), "{cmd:?}");
+    }
+    for event in sample_events() {
+        let mut out = [0u8; MAX_FRAME];
+        let n = encode_frame(&event, &mut out).expect("encodes");
+        let frozen = matches!(event, BridgeToHost::Ready(_) | BridgeToHost::Update(_));
+        assert_eq!(frozen, [0, 5].contains(&frame_body(&out[..n])[0]), "{event:?}");
+    }
+}
+
+#[test]
+fn link_codes_count_every_variant_when_compared_with_samples() {
+    // The samples hold every variant, so their codes are every code this build knows: 0 up to
+    // the count, with none missing.
+    let codes = |messages: std::vec::Vec<std::vec::Vec<u8>>| {
+        messages.iter().map(|message| message[0]).collect::<std::collections::BTreeSet<u8>>()
+    };
+    let host = codes(sample_lines().filter(|l| l.direction == "host").map(|l| l.message).collect());
+    let bridge =
+        codes(sample_lines().filter(|l| l.direction == "bridge").map(|l| l.message).collect());
+    assert_eq!(host, (0..HOST_TO_BRIDGE_CODES).collect());
+    assert_eq!(bridge, (0..BRIDGE_TO_HOST_CODES).collect());
+}
+
+#[test]
+fn link_decoder_reads_ready_when_core_len_is_longer() {
+    // A later build appends to the core; this one reads the fields it knows and skips the rest
+    // of the core to find the rest.
+    let mut core = pinned_core();
+    core.version = BRIDGE_VERSION;
+    let message = ready_message(&core, &[0xEE; 9], &rest_bytes(&pinned_rest()));
+    assert_eq!(message[1], 55);
+    assert_eq!(read_ready(&message), Ok(Ready { core, rest: Some(pinned_rest()) }));
+}
+
+#[test]
+fn link_decoder_refuses_ready_when_core_len_is_under_46() {
+    let mut message = PINNED_CORE.to_vec();
+    message[1] = 45;
+    assert_eq!(read_ready(&message), Err(LinkError::Malformed));
+}
+
+#[test]
+fn link_decoder_refuses_ready_when_core_len_runs_past_body() {
+    assert_eq!(read_ready(&PINNED_CORE[..PINNED_CORE.len() - 1]), Err(LinkError::Malformed));
+    let mut message = PINNED_CORE.to_vec();
+    message[1] = 47;
+    assert_eq!(read_ready(&message), Err(LinkError::Malformed));
+}
+
+#[test]
+fn link_decoder_reads_rest_when_only_minor_differs() {
+    let mut core = pinned_core();
+    core.version = Version::new(BRIDGE_VERSION.major, BRIDGE_VERSION.minor + 1, 7);
+    let read = read_ready(&ready_message(&core, &[], &rest_bytes(&pinned_rest())));
+    assert_eq!(read, Ok(Ready { core, rest: Some(pinned_rest()) }));
+}
+
+#[test]
+fn link_decoder_leaves_rest_unread_when_major_differs() {
+    // Never attempted: another major's rest can decode as wrong values.
+    let mut core = pinned_core();
+    core.version = Version::new(BRIDGE_VERSION.major + 1, BRIDGE_VERSION.minor, 0);
+    let read = read_ready(&ready_message(&core, &[], &rest_bytes(&pinned_rest())));
+    assert_eq!(read, Ok(Ready { core, rest: None }));
+}
+
+#[test]
+fn link_decoder_leaves_rest_unread_when_rest_is_garbage() {
+    let mut core = pinned_core();
+    core.version = BRIDGE_VERSION;
+    // A string length that never ends.
+    let read = read_ready(&ready_message(&core, &[], &[0xFF; 6]));
+    assert_eq!(read, Ok(Ready { core, rest: None }));
+}
+
+#[test]
+fn link_decoder_keeps_trial_code_when_it_names_none() {
+    let mut message = PINNED_CORE.to_vec();
+    message[43] = 9;
+    let read = read_ready(&message).expect("reads");
+    assert_eq!(read.core.trial, Trial::Other(9));
+    let mut out = [0u8; MAX_FRAME];
+    let n = encode_frame(&BridgeToHost::Ready(read), &mut out).expect("encodes");
+    assert_eq!(frame_body(&out[..n]), message, "the code goes back out as it came");
+    for (code, trial) in [(0, Trial::Settled), (1, Trial::OnTrial), (2, Trial::ConfirmFailed)] {
+        assert_eq!(Trial::from_code(code), trial);
+        assert_eq!(trial.code(), code);
+    }
+}
+
+#[test]
+fn link_round_trips_ready_core_alone_when_rest_is_none() {
+    let ready = BridgeToHost::Ready(Ready { core: pinned_core(), rest: None });
+    assert_eq!(round_trip(&ready), ready);
+}
+
+#[test]
+fn link_decoder_skips_frame_when_code_is_past_last_known() {
+    for code in [BRIDGE_TO_HOST_CODES, 0x7F, 0xFF] {
+        let mut frame = framed(FRAME_VERSION, &[code, 1, 2, 3]);
+        assert_eq!(decode_frame(&mut frame, Reads::All), Ok(None), "{code}");
+    }
+    for code in [HOST_TO_BRIDGE_CODES, 0x7F, 0xFF] {
+        assert_eq!(decode_host_frame(&mut framed(FRAME_VERSION, &[code, 1])), Ok(None), "{code}");
+    }
+}
+
+#[test]
+fn link_decoder_skips_unfrozen_codes_when_reading_core() {
+    for event in sample_events() {
+        let mut out = [0u8; MAX_FRAME];
+        let n = encode_frame(&event, &mut out).expect("encodes");
+        let decoded = decode_frame(&mut out[..n - 1], Reads::Core).expect("a sound frame");
+        match event {
+            BridgeToHost::Ready(_) | BridgeToHost::Update(_) => {
+                assert_eq!(decoded, Some(event));
+            }
+            _ => assert_eq!(decoded, None, "{event:?}"),
+        }
+    }
+}
+
+#[test]
+fn link_decoder_keeps_malformed_when_known_code_fails_its_body() {
+    // `Delivered` needs an id.
+    assert_eq!(
+        decode_frame(&mut framed(FRAME_VERSION, &[7]), Reads::All),
+        Err(LinkError::Malformed)
+    );
+    assert_eq!(decode_frame(&mut framed(FRAME_VERSION, &[7]), Reads::Core), Ok(None));
+}
+
+#[test]
+fn link_decoder_reads_identify_when_trailing_bytes_follow() {
+    let host = |message: &[u8]| decode_host_frame(&mut framed(FRAME_VERSION, message));
+    assert_eq!(host(&[0, 1, 2, 3]), Ok(Some(HostToBridge::Identify)));
+    assert_eq!(host(&[2, 0xFF]), Ok(Some(HostToBridge::Reset)));
+    let commit = encoded_op(&Op::Commit { session: 0x42 });
+    assert_eq!(host(&[4, 2, 3, 0x42, 9, 9]), Ok(Some(HostToBridge::Update(commit))));
+    let status = [5, 0x42, 2, 0x00, 0x20, 0x01, 0x00];
+    let mut message = std::vec![5, 7];
+    message.extend_from_slice(&status);
+    message.extend_from_slice(&[0xEE; 3]);
+    let event = decode_frame(&mut framed(FRAME_VERSION, &message), Reads::All);
+    let expected = UpdateStatusBytes::from_slice(&status).expect("fits");
+    assert_eq!(event, Ok(Some(BridgeToHost::Update(expected))));
+}
+
+#[test]
+fn link_decoder_cuts_update_status_when_longer_than_capacity() {
+    let status: std::vec::Vec<u8> = (1..=20).collect();
+    let mut message = std::vec![5, 20];
+    message.extend_from_slice(&status);
+    let event = decode_frame(&mut framed(FRAME_VERSION, &message), Reads::Core);
+    let cut = UpdateStatusBytes::from_slice(&status[..UPDATE_STATUS_MAX]).expect("fits");
+    assert_eq!(event, Ok(Some(BridgeToHost::Update(cut))));
+}
+
+#[test]
+fn link_decoder_refuses_update_when_length_runs_past_body() {
+    let event = decode_frame(&mut framed(FRAME_VERSION, &[5, 7, 5, 0x42]), Reads::All);
+    assert_eq!(event, Err(LinkError::Malformed));
+    assert_eq!(
+        decode_host_frame(&mut framed(FRAME_VERSION, &[4, 3, 3])),
+        Err(LinkError::Malformed)
+    );
+}
+
+#[test]
+fn link_decoder_refuses_host_update_when_longer_than_op_max() {
+    let len = OP_MAX + 1;
+    let mut message = std::vec![4, (len & 0x7F) as u8 | 0x80, (len >> 7) as u8];
+    message.extend(std::iter::repeat_n(2, len));
+    assert_eq!(decode_host_frame(&mut framed(FRAME_VERSION, &message)), Err(LinkError::Malformed));
+}
+
+#[test]
+fn link_decoder_refuses_frame_when_version_is_one() {
+    // A build from before the frozen core.
+    let mismatch = LinkError::VersionMismatch { ours: 2, theirs: 1 };
+    assert_eq!(decode_host_frame(&mut framed(1, &[0])), Err(mismatch));
+    assert_eq!(decode_frame(&mut framed(1, &PINNED_CORE), Reads::Core), Err(mismatch));
+    assert_eq!(FRAME_VERSION, 2);
+}
+
+/// The committed baseline of every sample message's bytes (`link_messages.txt`).
+const MESSAGES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/link_messages.txt");
+
+/// One message as `link_messages.txt` holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Line {
+    /// `host` for host to bridge, `bridge` for bridge to host.
+    direction: &'static str,
+    /// The message: its code, then its body.
+    message: std::vec::Vec<u8>,
+}
+
+impl Line {
+    fn text(&self) -> std::string::String {
+        let hex: std::string::String = self.message.iter().map(|b| format!("{b:02x}")).collect();
+        format!("{} {} {hex}", self.direction, self.message[0])
+    }
+}
+
+/// Every sample message, as this build encodes it.
+fn sample_lines() -> impl Iterator<Item = Line> {
+    let host = sample_commands().into_iter().map(|cmd| {
+        let mut out = [0u8; MAX_HOST_FRAME];
+        let n = encode_host_frame(&cmd, &mut out).expect("encodes");
+        Line { direction: "host", message: frame_body(&out[..n]) }
+    });
+    let bridge = sample_events().into_iter().map(|event| {
+        let mut out = [0u8; MAX_FRAME];
+        let n = encode_frame(&event, &mut out).expect("encodes");
+        Line { direction: "bridge", message: frame_body(&out[..n]) }
+    });
+    host.chain(bridge)
+}
+
+/// `link_messages.txt`: the major and minor its first line names, and its message lines, as text.
+fn baseline() -> ((u8, u8), std::vec::Vec<std::string::String>) {
+    let text = std::fs::read_to_string(MESSAGES).expect("tests/link_messages.txt is readable");
+    let mut lines = text.lines();
+    let first = lines.next().expect("a first line");
+    let version = first.strip_prefix("bridge-version ").expect("the first line names a version");
+    let (major, minor) = version.split_once('.').expect("major.minor");
+    let version = (major.parse().expect("a major"), minor.parse().expect("a minor"));
+    (version, lines.filter(|l| !l.trim().is_empty()).map(str::to_owned).collect())
+}
+
+/// The direction and code a baseline line names.
+fn code_of(line: &str) -> (&str, u8) {
+    let mut parts = line.split_whitespace();
+    let direction = parts.next().expect("a direction");
+    (direction, parts.next().expect("a code").parse().expect("a numeric code"))
+}
+
+/// How the samples' lines differ from the baseline's, sorted by the bump each difference needs.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Drift<'a> {
+    /// A major's: a baseline line the samples no longer produce, and a sample line the baseline
+    /// lacks under a code it holds, such as a new enum value in a known message.
+    changed: std::vec::Vec<&'a str>,
+    /// A minor's: a sample line under a code the baseline does not hold.
+    added: std::vec::Vec<&'a str>,
+}
+
+/// Compare `today`'s lines, the samples as this build encodes them, with the `baseline`'s.
+fn drift<'a>(baseline: &'a [std::string::String], today: &'a [std::string::String]) -> Drift<'a> {
+    use std::collections::BTreeSet;
+    let old: BTreeSet<&str> = baseline.iter().map(std::string::String::as_str).collect();
+    let new: BTreeSet<&str> = today.iter().map(std::string::String::as_str).collect();
+    let known: BTreeSet<_> = old.iter().map(|line| code_of(line)).collect();
+    let mut drift = Drift::default();
+    drift.changed.extend(old.iter().filter(|line| !new.contains(*line)));
+    for line in new.iter().filter(|line| !old.contains(*line)) {
+        if known.contains(&code_of(line)) {
+            drift.changed.push(line);
+        } else {
+            drift.added.push(line);
+        }
+    }
+    drift
+}
+
+/// Synthetic lines, as [`baseline`] and [`sample_lines`] give them.
+fn owned(lines: &[&str]) -> std::vec::Vec<std::string::String> {
+    lines.iter().map(|line| (*line).to_owned()).collect()
+}
+
+#[test]
+fn link_drift_needs_nothing_when_lines_match() {
+    let lines = owned(&["host 0 00", "bridge 1 0105"]);
+    assert_eq!(drift(&lines, &lines), Drift::default());
+}
+
+#[test]
+fn link_drift_needs_major_when_a_line_changes() {
+    let (old, new) = (owned(&["host 0 00", "host 1 01"]), owned(&["host 0 00", "host 1 02"]));
+    assert_eq!(drift(&old, &new), Drift { changed: vec!["host 1 01", "host 1 02"], added: vec![] });
+}
+
+#[test]
+fn link_drift_needs_major_when_a_known_code_gains_a_line() {
+    // A new sample of a message the file holds, as a new enum value in it gives.
+    let old = owned(&["host 0 00", "bridge 1 0100"]);
+    let new = owned(&["host 0 00", "bridge 1 0100", "bridge 1 0101"]);
+    assert_eq!(drift(&old, &new), Drift { changed: vec!["bridge 1 0101"], added: vec![] });
+}
+
+#[test]
+fn link_drift_needs_minor_when_a_new_code_appears() {
+    // A code the file holds in the other direction is another message.
+    let old = owned(&["host 0 00", "bridge 1 0100"]);
+    let new = owned(&["host 0 00", "bridge 1 0100", "host 1 01", "bridge 2 02"]);
+    let added = vec!["bridge 2 02", "host 1 01"];
+    assert_eq!(drift(&old, &new), Drift { changed: vec![], added });
+}
+
+#[test]
+fn link_keeps_message_bytes_when_major_unchanged() {
+    // Within a major a message's bytes never change (`crate::link` `//!`). A baseline line this
+    // build no longer encodes is such a change, and so is a new line under a code the file
+    // holds. Either needs a major bump and a regenerated file.
+    let ((major, _), lines) = baseline();
+    if major != BRIDGE_VERSION.major {
+        // The major moved: `link_names_every_message_when_minor_unchanged` asks for the file.
+        return;
+    }
+    let today: std::vec::Vec<_> = sample_lines().map(|line| line.text()).collect();
+    let changed = drift(&lines, &today).changed;
+    assert!(changed.is_empty(), "messages changed without a major bump: {changed:#?}");
+}
+
+#[test]
+fn link_names_every_message_when_minor_unchanged() {
+    // A minor adds messages at new codes. A code this build sends that the file lacks is one,
+    // and needs a minor bump and a regenerated file.
+    let ((major, minor), lines) = baseline();
+    assert_eq!(
+        (major, minor),
+        (BRIDGE_VERSION.major, BRIDGE_VERSION.minor),
+        "BRIDGE_VERSION moved: regenerate tests/link_messages.txt"
+    );
+    let today: std::vec::Vec<_> = sample_lines().map(|line| line.text()).collect();
+    let added = drift(&lines, &today).added;
+    assert!(added.is_empty(), "messages added without a minor bump: {added:#?}");
+}
+
+/// Regenerates `tests/link_messages.txt` from the samples:
+/// `cargo test -p wartui-proto --test link -- --ignored link_regenerates_messages`.
+///
+/// **Regenerating is the version bump.** A changed line, or a new line under a code the file
+/// holds, needs a major in `BRIDGE_VERSION` and `firmware/p4-bridge/Cargo.toml`, and an added code
+/// a minor; this refuses to write a file whose version does not show the bump its lines need. A
+/// sample removed reads as a changed line.
+#[test]
+#[ignore = "writes tests/link_messages.txt"]
+fn link_regenerates_messages_when_asked() {
+    let lines: std::vec::Vec<_> = sample_lines().map(|line| line.text()).collect();
+    if std::path::Path::new(MESSAGES).exists() {
+        let ((major, minor), old) = baseline();
+        let drift = drift(&old, &lines);
+        let (changed, added) = (!drift.changed.is_empty(), !drift.added.is_empty());
+        let ours = (BRIDGE_VERSION.major, BRIDGE_VERSION.minor);
+        let major_bumped = ours.0.cmp(&major).is_gt();
+        assert!(!changed || major_bumped, "a message changed: bump the major");
+        assert!(!added || ours > (major, minor), "a message was added: bump the minor");
+    }
+    let mut text = format!("bridge-version {}.{}\n", BRIDGE_VERSION.major, BRIDGE_VERSION.minor);
+    for line in lines {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    std::fs::write(MESSAGES, text).expect("tests/link_messages.txt is writable");
 }

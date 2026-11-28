@@ -217,7 +217,7 @@ const INTERRUPTED_EXIT: u8 = 130;
 
 /// A command stopped by ctrl-c.
 #[derive(Debug)]
-struct Interrupted;
+pub(crate) struct Interrupted;
 
 impl std::fmt::Display for Interrupted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -228,7 +228,7 @@ impl std::fmt::Display for Interrupted {
 impl std::error::Error for Interrupted {}
 
 /// Run `command`, or stop it at a ctrl-c, dropping its link so `main` can close it.
-pub(crate) async fn interruptible(command: impl Future<Output = Result<()>>) -> Result<()> {
+pub(crate) async fn interruptible<T>(command: impl Future<Output = Result<T>>) -> Result<T> {
     tokio::select! {
         outcome = command => outcome,
         // A handler that would not install is no ctrl-c: the arm is disabled, not fired.
@@ -527,7 +527,16 @@ fn describe(event: &LinkEvent) -> Option<String> {
         } => Some(reason.clone()),
         LinkEvent::Disconnected { reason, .. } => Some(format!("link down: {reason}")),
         LinkEvent::Garbled(err) => Some(format!("undecodable frame: {err}")),
-        LinkEvent::Message(_) => None,
+        // Once per life: every `Identify` brings another.
+        LinkEvent::Incompatible { core, fresh: true } => Some(crate::text::incompatible_text(
+            core.version,
+            wartui_proto::link::BRIDGE_VERSION,
+            core.standing,
+        )),
+        // The same life answering again: nothing new to say.
+        LinkEvent::Again(_)
+        | LinkEvent::Incompatible { fresh: false, .. }
+        | LinkEvent::Message(_) => None,
     }
 }
 
@@ -1452,6 +1461,8 @@ mod tests {
                 node_board: wartui_proto::bus::NodeBoard::NoCarrier,
                 radio: None,
                 image: None,
+                version: wartui_proto::link::BRIDGE_VERSION,
+                trial: wartui_proto::link::Trial::Settled,
             })
         };
         for (phase, said) in [

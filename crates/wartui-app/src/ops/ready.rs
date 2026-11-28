@@ -10,10 +10,17 @@
 //! the bridge's `Ready`; the first is the operator's notice that the click landed, and a later one
 //! returns no notice. A wait that runs out names a failure that is retried, else the bridge's
 //! silence once the subscription went through, else the pairing wait once it was announced.
+//!
+//! **An incompatible bridge ends the wait at once** ([`NotReady::Incompatible`]): it answered, with
+//! a `Ready` whose rest this host cannot read, and it announces nothing. It shares the frozen core
+//! alone with this host, so every command behind this wait refuses it the same way; only an update,
+//! which needs no announcement, goes on, from the core the handle keeps (`LinkHandle::reached`). A
+//! link whose last `Ready` read was such a one answers so at once, though the link dropped since
+//! (`LinkHandle::heard_incompatible`).
 
 use std::time::Duration;
 
-use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent, LinkHandle};
+use wartui_bridge::{BridgeCore, BridgeInfo, DisconnectCause, LinkEvent, LinkHandle};
 
 use crate::settings::Link;
 
@@ -40,6 +47,9 @@ pub enum NotReady {
     SilentAfterPairing,
     /// The wait ran out after the OS's pairing dialog was announced.
     PairingRanOut,
+    /// The bridge answered with a `Ready` whose rest this host cannot read: another major, or
+    /// another build of this one. `core` says which, and its version.
+    Incompatible(BridgeCore),
 }
 
 /// What [`ready`] came to.
@@ -63,6 +73,10 @@ pub async fn ready(
     usual: Duration,
     notice: &mut (dyn FnMut(ReadyNotice) + Send),
 ) -> ReadyWaited {
+    // Its `Ready` has gone by, and the transport sends one only as asked.
+    if let Some(&core) = link.heard_incompatible() {
+        return ReadyWaited { ready: Err(NotReady::Incompatible(core)), garbled: false };
+    }
     let mut until = tokio::time::Instant::now() + within;
     let mut wait = ReadyWait::new(over);
     let mut garbled = false;
@@ -150,6 +164,9 @@ impl ReadyWait {
     fn take(&mut self, event: Option<LinkEvent>) -> Taken {
         match event {
             Some(LinkEvent::Connected(info)) => Taken::Ended(Ok(info)),
+            Some(LinkEvent::Incompatible { core, .. }) => {
+                Taken::Ended(Err(NotReady::Incompatible(core)))
+            }
             Some(LinkEvent::Disconnected { reason, cause: DisconnectCause::AwaitingPairing }) => {
                 self.through = false;
                 if std::mem::replace(&mut self.pairing, true) {
@@ -200,7 +217,9 @@ impl ReadyWait {
 mod tests {
     use std::time::Duration;
 
-    use wartui_bridge::{DisconnectCause, LinkEvent};
+    use wartui_bridge::{BridgeCore, DisconnectCause, LinkEvent, link_pair};
+    use wartui_proto::bus::Version;
+    use wartui_proto::link::{BRIDGE_VERSION, Standing, Trial};
 
     use super::{NotReady, ReadyNotice, ReadyWait, Taken, pairing_deadline};
     use crate::settings::Link;
@@ -336,6 +355,55 @@ mod tests {
             Taken::Waiting
         );
         assert_eq!(wait.timed_out(), None);
+    }
+
+    /// The core of a bridge one major past this host's.
+    fn other_major() -> BridgeCore {
+        let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        BridgeCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+            image: None,
+            version,
+            trial: Trial::Settled,
+            uptime_ms: 400,
+            standing: Standing::of(version, BRIDGE_VERSION, false),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_wait_ends_incompatible_when_bridge_is_another_major() {
+        let mut wait = ReadyWait::new(Link::Bluetooth);
+        let event = Some(LinkEvent::Incompatible { core: other_major(), fresh: true });
+        assert_eq!(wait.take(event), Taken::Ended(Err(NotReady::Incompatible(other_major()))));
+
+        // At once, not at the timeout, and again for a link that already read it.
+        let (mut link, plumbing) = link_pair();
+        let event = LinkEvent::Incompatible { core: other_major(), fresh: true };
+        plumbing.events.send(event).await.expect("the link reads");
+        let start = tokio::time::Instant::now();
+        let within = Duration::from_secs(30);
+        let waited = super::ready(&mut link, Link::Usb, within, USUAL, &mut |_| {}).await;
+        assert_eq!(waited.ready, Err(NotReady::Incompatible(other_major())));
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        let again = super::ready(&mut link, Link::Usb, within, USUAL, &mut |_| {}).await;
+        assert_eq!(again.ready, Err(NotReady::Incompatible(other_major())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_wait_ends_incompatible_when_link_dropped_after_incompatible_ready() {
+        let (mut link, plumbing) = link_pair();
+        let event = LinkEvent::Incompatible { core: other_major(), fresh: true };
+        plumbing.events.send(event).await.expect("the link reads");
+        let reason = "the bridge disconnected".to_owned();
+        let down = LinkEvent::Disconnected { reason, cause: DisconnectCause::Other };
+        plumbing.events.send(down).await.expect("the link reads");
+        link.recv().await.expect("the unread `Ready`");
+        link.recv().await.expect("the drop");
+        let start = tokio::time::Instant::now();
+        let within = Duration::from_secs(30);
+        let waited = super::ready(&mut link, Link::Bluetooth, within, USUAL, &mut |_| {}).await;
+        assert_eq!(waited.ready, Err(NotReady::Incompatible(other_major())));
+        assert_eq!(start.elapsed(), Duration::ZERO, "the bridge is known already");
     }
 
     #[tokio::test(start_paused = true)]

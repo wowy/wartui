@@ -239,8 +239,9 @@ bridge for the scan, which it gives to one node once two can scan.
 - **Channel 14 is never scanned**, because `esp-radio` can't tune it. It's Japan-only 802.11b, so
   this should rarely matter.
 - **No compatibility with earlier versions until 1.0.** Build the host and flash every board from
-  the same tree. A host and bridge from different trees will not talk at all, and the bridge
-  assigns no node whose firmware is another major or minor.
+  the same tree. A host and bridge on different majors share only the link's frozen core: the host
+  names the bridge's version and updates it with `wartui flash-bridge`, and captures nothing until
+  then. The bridge assigns no node whose firmware is another major or minor.
 
 ## Development
 

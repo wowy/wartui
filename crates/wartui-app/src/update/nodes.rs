@@ -39,13 +39,16 @@
 //! **A stop cancels the sessions, so each node is told before the run ends.** One that comes
 //! before any session starts ends the run with nothing sent ([`CutShort::BeforeStart`]).
 //!
+//! **A bridge this host cannot read past the frozen core is refused up front**
+//! ([`CutShort::Incompatible`]): a node's update travels in messages outside that core.
+//!
 //! [`wartui_core::ota`] has the session's own reasoning.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use wartui_bridge::{LinkEvent, LinkHandle};
+use wartui_bridge::{BridgeCore, LinkEvent, LinkHandle};
 use wartui_core::ota::{self, Failure, Ids, OtaImage, OtaSession, Outcome};
 use wartui_core::runtime::{FleetError, FleetReport, drive_fleet, now, stop_scan};
 use wartui_proto::bus::{Board, Capabilities, Heartbeat, Slot, UpType, Version};
@@ -276,6 +279,9 @@ pub enum CutShort {
     Upload(update::Failure),
     /// The bridge lost the image after checking it.
     CacheLost,
+    /// The bridge shares only the frozen core with this host, which carries no node update.
+    /// Nothing was sent.
+    Incompatible(BridgeCore),
 }
 
 /// How a run that did not update every chosen node failed.
@@ -290,6 +296,9 @@ pub enum Failed {
     /// The run was stopped.
     #[error("canceled")]
     Canceled,
+    /// The bridge shares only the frozen core with this host, which carries no node update.
+    #[error("the bridge {} shares only the frozen core with this host", .0.version)]
+    Incompatible(BridgeCore),
     /// `failed` of `total` nodes did not update.
     #[error("{failed} of {total} nodes failed")]
     Nodes { failed: usize, total: usize },
@@ -310,6 +319,7 @@ impl Ended {
                 return Err(Failed::Upload { failure, done: done().count() });
             }
             Some(CutShort::CacheLost) => return Err(Failed::CacheLost),
+            Some(CutShort::Incompatible(core)) => return Err(Failed::Incompatible(core)),
             None => {}
         }
         if self.outcomes.iter().any(|(_, outcome)| *outcome == Outcome::Failed(Failure::Canceled)) {
@@ -324,7 +334,8 @@ impl Ended {
 }
 
 /// Update every node `plan` chooses, until each has an outcome or `stop` resolves, which
-/// cancels every session. With nothing chosen it returns at once and sends nothing.
+/// cancels every session. With nothing chosen, or a bridge this host cannot read
+/// ([`CutShort::Incompatible`]), it returns at once and sends nothing.
 pub async fn run(
     link: &mut LinkHandle,
     plan: &Plan,
@@ -352,6 +363,9 @@ async fn run_from(
     stop: impl Future<Output = ()>,
     mut say: impl FnMut(Progress),
 ) -> Ended {
+    if let Some(core) = link.incompatible() {
+        return Ended { outcomes: Vec::new(), cut_short: Some(CutShort::Incompatible(core)) };
+    }
     let chosen: Vec<(Target, bool)> = plan
         .rows
         .iter()
@@ -486,7 +500,7 @@ mod tests {
     use wartui_bridge::link_pair;
     use wartui_bridge::sim::{SimConfig, SimTransport, minor_behind};
     use wartui_proto::bus::{NODE_VERSION, UpdateState, UpdateStatus};
-    use wartui_proto::link::HostToBridge;
+    use wartui_proto::link::{BRIDGE_VERSION, HostToBridge, Standing, Trial};
 
     use super::super::testing::fixture;
     use super::*;
@@ -867,6 +881,31 @@ mod tests {
         let ended = run(&mut link, &plan, std::future::pending(), |_| panic!("said")).await;
         assert_eq!(ended, Ended::default());
         assert!(plumbing.commands.try_recv().is_none(), "the scan was not stopped either");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn update_nodes_refuses_when_bridge_is_incompatible() {
+        let (mut link, mut plumbing) = link_pair();
+        let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        let core = BridgeCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+            image: None,
+            version,
+            trial: Trial::Settled,
+            uptime_ms: 400,
+            standing: Standing::of(version, BRIDGE_VERSION, false),
+        };
+        plumbing.compatibility.heard(&core);
+        let image = NodeImage::parse(fixture(Board::Esp32c5, "0.1.1", 0x1000)).unwrap();
+        let targets = vec![target(node(1), caps(Version::new(0, 0, 9), false))];
+        let plan = Plan::of(targets, HashMap::from([(Board::Esp32c5, image)]), false);
+        let ended = run(&mut link, &plan, std::future::pending(), |_| panic!("said")).await;
+        assert_eq!(ended.cut_short, Some(CutShort::Incompatible(core)));
+        assert_eq!(ended.verdict(), Err(Failed::Incompatible(core)));
+        assert!(
+            plumbing.commands.try_recv().is_none(),
+            "nothing was sent, the scan's stop included"
+        );
     }
 
     #[tokio::test(start_paused = true)]

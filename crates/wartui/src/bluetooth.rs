@@ -382,7 +382,8 @@ enum Served<'a> {
 #[cfg(any(target_os = "linux", test))]
 fn served_by(event: &LinkEvent) -> Served<'_> {
     match event {
-        LinkEvent::Connected(_) => Served::Yes,
+        // A bridge this host cannot read past its core still served this PC its `Ready`.
+        LinkEvent::Connected(_) | LinkEvent::Incompatible { .. } => Served::Yes,
         LinkEvent::Disconnected { cause: DisconnectCause::NotBonded, .. } => Served::Refused,
         LinkEvent::Disconnected { cause: DisconnectCause::MaybeNotBonded, .. } => Served::Dropped,
         // Still connected, and waiting on the OS or, past it, on the bridge.
@@ -391,7 +392,7 @@ fn served_by(event: &LinkEvent) -> Served<'_> {
             ..
         } => Served::Waiting,
         LinkEvent::Disconnected { reason, .. } => Served::Failed(reason),
-        LinkEvent::Message(_) | LinkEvent::Garbled(_) => Served::Waiting,
+        LinkEvent::Again(_) | LinkEvent::Message(_) | LinkEvent::Garbled(_) => Served::Waiting,
     }
 }
 

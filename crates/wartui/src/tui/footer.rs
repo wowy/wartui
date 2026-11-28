@@ -4,8 +4,12 @@
 //!
 //! What the operator should know that is no fault takes a plain line of its own
 //! ([`note_line`]): a full pending buffer, a USB host holding the bridge this Bluetooth host
-//! reaches, or the transport waiting on the OS's pairing dialog or past it on the bridge's
-//! answer. The link is down in the last three, but nothing is broken.
+//! reaches, the transport waiting on the OS's pairing dialog or past it on the bridge's answer, or
+//! a bridge a minor apart from this build. The link is down in the middle three, but nothing is
+//! broken.
+//!
+//! A bridge this build reads only for its frozen core is the first fault, in place of the link's:
+//! it names both versions and the fix (`crate::text::incompatible_text`).
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -18,7 +22,7 @@ use wartui_proto::reset::ResetCause;
 
 use super::format::channel_set;
 use super::ui::Ui;
-use crate::text::thousands;
+use crate::text::{incompatible_text, minor_apart_text, thousands};
 
 /// Draw the footer into `area`. `faults` are already wrapped by [`fault_lines`].
 pub(super) fn draw_footer(
@@ -98,6 +102,9 @@ pub(super) fn note_line(note: &Note) -> String {
         Note::WaitingOnPairing { notice } | Note::WaitingOnReady { notice } => {
             format!("  {notice}")
         }
+        Note::BridgeMinorApart { bridge, host, older } => {
+            format!("  {}", minor_apart_text(*bridge, *host, *older))
+        }
     }
 }
 
@@ -109,6 +116,9 @@ pub(super) fn fault_texts(view: &View) -> Vec<String> {
 /// A fault's line, before [`fault_lines`] fits it to the width.
 fn fault_line(fault: &Fault) -> String {
     match fault {
+        Fault::BridgeIncompatible { bridge, host, standing } => {
+            incompatible_text(*bridge, *host, *standing)
+        }
         Fault::LinkDown(link) => format!("link down: {}", link.detail),
         Fault::StoreDropped { rows } => format!("store dropped {}", thousands(*rows)),
         Fault::Unswept { pool, channels } => format!(
@@ -272,11 +282,13 @@ fn chunks(fault: &str, width: usize) -> Vec<String> {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use wartui_bridge::{DisconnectCause, TransportError};
+    use wartui_bridge::{BridgeCore, DisconnectCause, TransportError};
     use wartui_core::engine::{Counters, Snapshot};
     use wartui_core::gps::{GpsCounters, GpsStatus};
     use wartui_core::position::PositionSource;
+    use wartui_proto::bus::Version;
     use wartui_proto::fan::{FanDuty, FanStats};
+    use wartui_proto::link::{BRIDGE_VERSION, End, Standing, Trial};
     use wartui_proto::plan::{ChannelPool, ChannelSet, IndexRun};
 
     use super::*;
@@ -890,5 +902,120 @@ mod tests {
     #[test]
     fn footer_omits_unswept_warning_when_every_channel_is_in_a_share() {
         assert!(faults(&quiet()).is_empty(), "{:?}", faults(&quiet()));
+    }
+
+    /// A capture whose link reached a bridge on `version` and read it only for its frozen core.
+    fn reached_unread(version: Version) -> Snapshot {
+        let mut snapshot = quiet();
+        snapshot.bridge = None;
+        snapshot.link_up = false;
+        snapshot.link_error = None;
+        snapshot.incompatible = Some(BridgeCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
+            image: None,
+            version,
+            trial: Trial::Settled,
+            uptime_ms: 400,
+            standing: Standing::of(version, BRIDGE_VERSION, false),
+        });
+        snapshot
+    }
+
+    /// A bridge a major behind this build's, as a later host reads one: this tree's major is
+    /// the lowest, so the standing is set by hand.
+    fn reached_older() -> Snapshot {
+        let mut snapshot = reached_unread(BRIDGE_VERSION);
+        if let Some(core) = &mut snapshot.incompatible {
+            core.version = Version::new(0, 0, 9);
+            core.standing = Standing::Apart { older: End::Bridge };
+        }
+        snapshot
+    }
+
+    /// The incompatible bridge's line for `snapshot`, and the fault box's lines at 58 columns
+    /// behind a second fault.
+    fn incompatible_at_58(mut snapshot: Snapshot) -> (String, Vec<String>) {
+        snapshot.store.dropped = 7;
+        let faults = faults(&snapshot);
+        assert!(faults[0].contains("wartui"), "first: {faults:?}");
+        assert!(!faults.iter().any(|fault| fault.starts_with("link down")), "{faults:?}");
+        (faults[0].clone(), fault_lines(&faults, 58))
+    }
+
+    #[test]
+    fn fault_lines_show_incompatible_bridge_first_when_bridge_is_older() {
+        let (line, lines) = incompatible_at_58(reached_older());
+        assert!(line.starts_with("run `wartui flash-bridge`:"), "{line}");
+        assert!(line.contains(&format!("0.0.9 is older than wartui {BRIDGE_VERSION}")), "{line}");
+        assert!(lines.iter().all(|l| l.chars().count() <= 58), "{lines:?}");
+        assert!(rejoined(&lines).starts_with(&line), "whole, and first: {lines:?}");
+    }
+
+    #[test]
+    fn fault_lines_show_incompatible_bridge_first_when_host_is_older() {
+        let newer = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        let (line, lines) = incompatible_at_58(reached_unread(newer));
+        assert!(line.starts_with("update wartui:"), "{line}");
+        assert!(line.contains(&format!("{newer} is newer than wartui {BRIDGE_VERSION}")), "{line}");
+        assert!(lines.iter().all(|l| l.chars().count() <= 58), "{lines:?}");
+        assert!(rejoined(&lines).starts_with(&line), "whole, and first: {lines:?}");
+    }
+
+    #[test]
+    fn fault_lines_show_incompatible_bridge_first_when_bridge_is_another_build() {
+        let (line, lines) = incompatible_at_58(reached_unread(BRIDGE_VERSION));
+        assert!(
+            line.starts_with("run `wartui flash-bridge` to put this build's firmware"),
+            "{line}"
+        );
+        assert!(line.contains("different builds of one version"), "{line}");
+        assert!(lines.iter().all(|l| l.chars().count() <= 58), "{lines:?}");
+        assert!(rejoined(&lines).starts_with(&line), "whole, and first: {lines:?}");
+    }
+
+    /// The footer's rows of `snapshot` drawn at 58×26, and whether the big counts kept their row.
+    fn footer_at_58(snapshot: &Snapshot) -> (Vec<String>, bool) {
+        let mut terminal = Terminal::new(TestBackend::new(58, 26)).expect("test backend");
+        terminal.draw(|frame| draw(frame, snapshot, &mut idle())).expect("drawing");
+        let screen = terminal.backend().to_string();
+        let lines: Vec<String> = screen.lines().map(|l| l.trim_matches('"').to_owned()).collect();
+        let counts = lines.iter().any(|l| l.contains("unique APs") && l.contains("unique BLE"));
+        let footer = lines.iter().skip_while(|l| !l.contains(" q quit")).cloned().collect();
+        (footer, counts)
+    }
+
+    #[test]
+    fn footer_shows_each_incompatible_wording_whole_when_screen_is_58_by_26() {
+        let newer = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        for snapshot in [reached_older(), reached_unread(newer), reached_unread(BRIDGE_VERSION)] {
+            let (footer, counts) = footer_at_58(&snapshot);
+            assert!(counts, "the big counts keep their row: {footer:?}");
+            let line = &faults(&snapshot)[0];
+            let shown: String = footer.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+            assert!(shown.contains(line.as_str()), "{line}\n{footer:#?}");
+        }
+    }
+
+    #[test]
+    fn footer_shows_minor_apart_note_whole_when_screen_is_58_by_26() {
+        let newer = Version::new(BRIDGE_VERSION.major, BRIDGE_VERSION.minor + 1, 0);
+        let older = Version::new(BRIDGE_VERSION.major, BRIDGE_VERSION.minor.saturating_sub(1), 0);
+        for (version, says) in [(newer, "update wartui"), (older, "flash-bridge")] {
+            let mut snapshot = quiet();
+            snapshot.bridge.as_mut().expect("a bridge").version = version;
+            let note = note(&snapshot, |note| matches!(note, Note::BridgeMinorApart { .. }));
+            if version == BRIDGE_VERSION {
+                // 0.0 has no minor below it.
+                assert_eq!(note, None);
+                continue;
+            }
+            let note = note.expect("the note");
+            assert!(note.trim_start().starts_with(says), "leads with the fix: {note}");
+            assert!(note.chars().count() <= 58, "{note}");
+            assert!(faults(&snapshot).is_empty(), "no fault: {:?}", faults(&snapshot));
+            let (footer, counts) = footer_at_58(&snapshot);
+            assert!(counts, "the big counts keep their row: {footer:?}");
+            assert!(footer.iter().any(|l| l.trim_end() == note), "{note}\n{footer:#?}");
+        }
     }
 }

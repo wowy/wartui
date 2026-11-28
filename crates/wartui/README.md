@@ -600,23 +600,44 @@ The image comes from the same three sources as `flash-fleet`'s, with `firmware/p
 `firmware/node`; a release publishes one under the same
 `images/<tag>/`. Nothing is sent unless the image is an app-only image whose header names the
 `esp32p4` and whose descriptor names `wartui-p4-bridge-fw`, its checksum and appended SHA-256 hold,
-and it fits the P4's 1920 KiB app slot.
+and it fits the P4's app slot of 0x7F0000 bytes, about 7.9 MiB.
 
 The run opens the bridge, checks it answers as a P4 with the chosen address, and sends the image.
 The P4 checks it, switches slots and reboots into it on trial. The connection holds through the
-reboot, and the run asks for a status every second, since a rebooted P4 says nothing until it hears
-a host. It waits up to 120 s for the P4 to come back, and the first frame after the C6 answers
-confirms the image. When the new image carries a new C6
-image, the P4 then updates its C6, and the run prints that progress for up to 30 s. A P4 already
-running the image is left alone. The board prints, by its last two octets:
+reboot, and the run asks the P4 to announce itself every second, since a rebooted P4 says nothing
+until it hears a host. It waits up to 120 s for the P4 to come back, and the first frame after the
+C6 answers confirms the image. Each announcement names the image the P4 runs and whether it is
+still on trial, and the run reads the outcome from them. Each line the bridge repeats with its
+announcement is printed once. When the new image carries a new C6 image, the P4 then updates its
+C6, and the run prints that progress for up to 30 s. A P4 already running the image is left alone.
 
-| Line                                              | Meaning                                                  |
-|---------------------------------------------------|----------------------------------------------------------|
-| `n%  sending`                                     | The image is on its way                                  |
-| `installing; waiting for the bridge to come back` | The P4 holds the whole image and is rebooting into it    |
-| `installed and confirmed`                         | The P4 came back on the new image and confirmed it       |
-| `fault  …`, `Info  …`                             | A line the bridge sent, such as its C6's update progress |
-| `already runs this image`                         | Nothing was sent                                         |
+**A bridge on another major, or another build of this one, is updated all the same.** Every other
+command refuses it ("Another major or build" below), and `flash-bridge` is the fix: its update
+travels in the part of the link every build shares, so it first prints what it found,
+`runs bridge firmware 1.0.0, newer than wartui 0.1.0; updating it over the frozen core`, then
+updates as above. An image that brings the bridge onto another major is judged the same way; the
+C6's progress is not printed for it, since this build does not read that bridge's lines. When the
+bridge already runs the image being sent, the run fails instead, with `already runs this image`:
+sending it again changes nothing, and the remedy is a wartui built from the tree the image came
+from, or another image.
+
+A ctrl-c while the image is sent stops the run: it ends the update on the P4, which keeps its
+image, prints `stopped before the install; … keeps its image`, and exits 130, as an interrupted
+command does. Once `installing` is printed the run goes on to the outcome, since only a host
+confirms the new image; a second ctrl-c exits at once. The board prints, by its last two octets:
+
+| Line                                               | Meaning                                                  |
+|----------------------------------------------------|----------------------------------------------------------|
+| `n%  sending`                                      | The image is on its way                                  |
+| `installing; waiting for the bridge to come back`  | The P4 holds the whole image and is rebooting into it    |
+| `installed and confirmed`                          | The P4 came back on the new image and confirmed it       |
+| `fault  …`, `Info  …`                              | A line the bridge sent, such as its C6's update progress |
+| `already runs this image`                          | Nothing was sent                                         |
+| `stopping; ending the bridge's update session`     | A ctrl-c while sending; the run ends                     |
+| `installing, so the update runs to its outcome; …` | A ctrl-c after the install; a second one exits           |
+
+The P4 stops its scan as it takes the image, over either link. A run that fails leaves the scan
+stopped: `wartui run` or `wartui scan start` starts it again.
 
 The run fails, and the P4 keeps the image it ran, when:
 
@@ -627,8 +648,9 @@ The run fails, and the P4 keeps the image it ran, when:
   stop the transfer.
 - The P4 does not announce itself within 10 s: another program, such as a running `wartui run`,
   holds the port, or the bridge is still starting. Try again.
-- The P4 answers in a form this build cannot read, or does not answer the update: it runs
-  firmware from another tree. Flash it once by hand.
+- The P4 sends frames that fail this build's frame check, or names no image and does not answer
+  the update: it runs firmware from before the frozen core, which takes no update over its link.
+  Flash it once by hand, per `firmware/p4-bridge/README.md` § "First flash".
 - The P4 refuses the update: it has no second app slot, as on espflash's default partition table.
   Flash it once by hand with its own table.
 - The bridge's port stops taking the image: the run says at what percent, then that the port has
@@ -637,22 +659,26 @@ The run fails, and the P4 keeps the image it ran, when:
   hubs, and not from its own port or through one USB 2.0 hub
   (`docs/p4-host-uart-findings.md` § "A Mac host behind a dock's hub chain").
 
-The run also fails when the P4 came back on the new image but did not report it confirmed within
-3 s. The image is then still on trial and rolls back unless a host confirms it: run `flash-bridge`
-again, or any `wartui` command that opens the bridge.
+The run also fails when the P4 came back on the new image and still announces it on trial 3 s
+later, or announces that confirming it failed (`could not confirm it`, after the P4's own line
+saying why). The image then rolls back unless a host confirms it: run `flash-bridge` again, or any
+`wartui` command that opens the bridge.
 
 #### Over Bluetooth
 
 The bridge is the one `--bridge` names, by address, or the one remembered over Bluetooth in
 `wartui.toml`; never one a scan merely hears. Nothing is probed, and nothing is saved. With neither,
 the run is refused and asks for `--bridge XX:YY`. The run stops the bridge's scan before it sends,
-saying so when the bridge does not report it stopped; the P4 boots stopped either way.
+saying so when the bridge does not report it stopped; the P4 boots stopped either way. Toward a
+bridge on another major or build it sends no stop: the P4 stops its own scan when it takes the
+update.
 
 The P4's reboot resets its C6, which drops the link, and when the new image carries a new C6 image
 the C6's update drops it again. The transport reconnects each time, and the run reads the outcome
 across the reconnects: it waits up to 180 s for the bridge to come back, then up to 150 s more, long
-enough for three trial boots to end in a rollback. It ends once the new image is confirmed and the
-link has stayed up 5 s with no line about the C6's update. An update takes about 80 s over
+enough for three trial boots to end in a rollback. It asks the bridge to announce itself as soon as
+the link comes back, and every second after. It ends once an announcement says the new image is
+confirmed and the link has stayed up 5 s with no restart and no line about the C6's update. An update takes about 80 s over
 Bluetooth, against about 20 s over USB, from a PC at a 30 ms connection interval. Besides the lines
 above, the board prints:
 
@@ -660,7 +686,6 @@ above, the board prints:
 |-------------------------------------------------------------|---------------------------------------------------------------|
 | `the link dropped as the bridge restarts; reconnecting`     | The P4 is rebooting into the image, or its C6 is restarting   |
 | `the radio restarted on its bundled image`                  | The C6's update ended and the link came back                  |
-| `installed, and confirmed: it outlived its trial watchdog`  | The confirm's line was lost to a drop, and the P4 stayed up past its 30 s trial watchdog, which only a confirmed image does |
 | `did not report its scan stopped; updating anyway`          | The bridge did not answer the stop in 2 s                     |
 
 It fails, beside the cases above, when:
@@ -669,8 +694,8 @@ It fails, beside the cases above, when:
 - The bridge comes back on the life it had before the install: `never took the install, and keeps
   its image`. The link dropped before the P4 took the `Install`. Run `flash-bridge` again. A C6
   that restarts alone at that moment reads as a rollback instead.
-- The bridge does not come back within 180 s, or comes back on the new image with no confirm seen
-  by the end: `no confirm was seen over Bluetooth`, and the image rolls back unless a host confirms
+- The bridge does not come back within 180 s, or comes back on the new image still on trial at
+  the end: `no confirm was seen over Bluetooth`, and the image rolls back unless a host confirms
   it.
 - Nothing answers over Bluetooth: the same notice `status` gives ("When the Bluetooth link does not
   come up").
@@ -954,7 +979,7 @@ wartui sd-log LOG/00000007.BIN --verbose   # one file, each frame in full under 
 $ wartui sd-log LOG/00000007.BIN
 LOG/00000007.BIN  file 7, part 0 · fw 0.1.0 on ota_0, confirmed · reset PowerOn, last phase Unknown
 00:00:05.000  open        format 1 · card 29.7 GB, 29.3 GB free · image abababab
-00:00:05.010  ready       02:00:5E:10:44:C0 firmware 0.1.0 link v1
+00:00:05.010  ready       02:00:5E:10:44:C0 firmware 0.1.0 link v2
 00:00:05.020  status      1200 received, 3 dropped, 0 oversize, up 5s · P4 —
 00:00:06.000  status*     1200 received, 3 dropped, 0 oversize, up 6s · P4 48 °C · C6 45 °C 3.30 V heap 40K free
 00:00:06.100  log         sd: hello
@@ -976,7 +1001,8 @@ when the boot before ended in a panic, and `--verbose` prints the panic's text u
 file of that boot repeats it, so count panics by boot (part 0), not by file. The bridge also logs
 the text at boot as `last boot panicked: …` lines, and says them to the first host that attaches.
 A line per record follows: the P4's uptime, with `Nd ` ahead past a day, the record's kind and
-what it says. A frame reads as `wartui sniff` prints it.
+what it says. A frame reads as `wartui sniff` prints it. A `ready` from a bridge on another major
+names only its address and version, since the rest of its `Ready` is not read.
 
 | Kind                              | Record                                                                   |
 |-----------------------------------|--------------------------------------------------------------------------|
@@ -1508,6 +1534,18 @@ change of share or Bluetooth role, empties it.
 
 The footer shows faults only once they happen, so a clean run has a clean footer:
 
+- **``run `wartui flash-bridge`: bridge firmware 0.0.9 is older than wartui 0.1.0, which only
+  updates or resets it``**, first and in place of `link down`: the bridge runs another major. The
+  two share only the part of the link that names, updates and resets the bridge, so no capture
+  runs and no scan starts until it is updated. **`update wartui: …`** says the bridge's major is
+  the newer one. **``run `wartui flash-bridge` to put this build's firmware on the bridge: …``** is a
+  bridge on this major whose announcement this build cannot read: another build of the same
+  version, one that changed a message without the version bump. Any other command refuses such a
+  bridge with the same line.
+- **`update wartui: bridge 0.2.0 is newer than wartui 0.1.0`**, a line of its own below the
+  totals: the bridge runs another minor. Not a fault: the capture runs, and the older end lacks
+  only what the other's minor added, which an update brings. **`flash-bridge: bridge 0.1.0 is
+  older than wartui 0.2.0`** is the other way round.
 - **`lost N`**: whole batches missing between node and host, summed over the fleet, from gaps in
   each batch's sequence number. It appears once any node loses one, and each node's own count is
   its block's `lost` line. A sequence advances only when the P4 acknowledges a batch, so a gap is
@@ -1526,7 +1564,8 @@ The footer shows faults only once they happen, so a clean run has a clean footer
   turned away is not held back, so the next pass reports it; only one never heard again is lost.
   A steadily growing count means a buffer too small for the area.
 - **`garbled N`**: USB frames from the bridge the host could not decode: the framing or the
-  checksum failed, the frame was cut short, or it spoke another protocol revision. A few after a
+  checksum failed, the frame was cut short, or it came from firmware from before the frozen core.
+  A bridge on another major is not counted here: its messages are skipped unread. A few after a
   bridge reset are its bootloader's log and the half-frame the host caught while the framing
   resynchronized, which it does on its own. A count that climbs by the second is the host's USB
   path mangling the bridge's longer bursts: a Raspberry Pi 5 or CM5 does it to the GPS batches and
@@ -1768,7 +1807,7 @@ over in a sweep is kept; being slower than its neighbor proves nothing. With `re
 (settings, or `[bridge] remember = false`), `run` drops both, saves no bridge, and sweeps on every
 start.
 
-The header's `waiting for bridge` has four causes; the fault box names it:
+The header's `waiting for bridge` has five causes; the fault box names it:
 
 - **`link down: could not open …`**: the port is not ours. Nearly always another `wartui`, `screen`,
   an IDE's serial monitor, or ModemManager holds it. ModemManager clears on its own: where it runs,
@@ -1779,6 +1818,9 @@ The header's `waiting for bridge` has four causes; the fault box names it:
 - **`swept N boards and none answered`**: no attached CH343 answered.
 - **`no bridge found, as no CH343 is attached`**: attach the bridge, or name a bridge on another
   port with `--bridge PATH`.
+- **``run `wartui flash-bridge`: …``** or **`update wartui: …`**: the bridge answered, on another
+  major or another build ("Reading the node blocks", the footer's faults). It is reached and
+  takes nothing but an update or a reset.
 
 With no fault, `wartui reset` reboots a bridge that still reads what it is sent. A power cycle is
 the fallback for a bridge that answers nothing.
@@ -1837,7 +1879,8 @@ takes one packet and queues the rest, and closing the port waits for them.
 `run` never pays this cost. It asks a CH343 every 500 ms until the bridge answers, since a CH343
 drains whatever it is sent, and any other port with one frame. Once the bridge has answered, it
 sends a status poll whenever 10 s pass without a frame, since the P4 stops writing to a host it has
-not heard from in 15 s.
+not heard from in 15 s. Toward a bridge on another major or build that poll is an `Identify`, the
+one frame such a bridge decodes.
 
 `wartui reset` never sweeps, because a `Reset` sent down the wrong port reboots the wrong board. It
 goes to the `--bridge` board, else the CH343 the bridge was remembered on, else the only CH343

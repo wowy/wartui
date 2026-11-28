@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 use wartui_proto::link::{
-    BridgeToHost, FrameAccumulator, HostToBridge, MAX_FRAME, MAX_HOST_FRAME, decode_frame,
+    BridgeToHost, FrameAccumulator, HostToBridge, MAX_FRAME, MAX_HOST_FRAME, Reads, decode_frame,
 };
 use wartui_proto::mac::{self, Mac};
 
@@ -32,7 +32,9 @@ use crate::ports::{self, PortCandidate};
 use crate::remember::BridgeMemory;
 use crate::spec::BridgeSpec;
 use crate::wire::encode_for_wire;
-use crate::{DisconnectCause, LinkEvent, LinkHandle, TransportError, link_pair};
+use crate::{
+    BridgeCore, Compatibility, DisconnectCause, LinkEvent, LinkHandle, TransportError, link_pair,
+};
 
 /// How long one tick of the patience below is, and how often a CH343 is asked again. The
 /// first tick of a tokio interval fires immediately, which is when the first `Identify` goes
@@ -75,13 +77,14 @@ const PROBE_GARBLE_LIMIT: u32 = 64;
 
 /// The longest a proven connection goes without writing a frame.
 ///
-/// The P4 writes to a host only while it hears one, and stops [`HOST_SILENCE_SECS`] after the
-/// last frame (`firmware/p4-bridge/src/host.rs`). A command waiting on something else — an operator's
-/// answer, an image build, a node's heartbeat — would otherwise go deaf partway. So a
-/// connection that has written nothing for this long sends a `GetStatus`. Twice the engine's
-/// 5 s status poll, so a running capture never needs one: the engine checks for a due poll
-/// only on its tick, and a keepalive on the same interval would usually fire first and double
-/// the polls. Never before the first `Ready`: until then the board is unproven ([`connect`]).
+/// The P4 writes to a host only while it hears one, and stops [`HOST_SILENCE_SECS`] after the last
+/// frame it decodes (`firmware/p4-bridge/src/host.rs`). A command waiting on something else — an
+/// operator's answer, an image build, a node's heartbeat — would otherwise go deaf partway. So a
+/// connection that has written nothing for this long sends a `GetStatus`, or an `Identify` toward
+/// an incompatible bridge, which cannot decode this host's `GetStatus`. Twice the engine's 5 s
+/// status poll, so a running capture never needs one: the engine checks for a due poll only on its
+/// tick, and a keepalive on the same interval would usually fire first and double the polls. Never
+/// before the first `Ready`: until then the board is unproven ([`connect`]).
 ///
 /// [`HOST_SILENCE_SECS`]: wartui_proto::link::HOST_SILENCE_SECS
 const KEEPALIVE: Duration = Duration::from_secs(10);
@@ -258,9 +261,10 @@ fn identify<P: Read + Write + ?Sized>(
         };
         for &byte in &buf[..read] {
             let Some(frame) = acc.push(byte) else { continue };
-            // Whatever decodes ahead of the `Ready` was sent before this question.
-            if let Ok(BridgeToHost::Ready { mac, .. }) = decode_frame::<BridgeToHost>(frame) {
-                return Some(mac);
+            // Whatever decodes ahead of the `Ready` was sent before this question. The address
+            // is in the frozen core, so a bridge on any build names itself.
+            if let Ok(Some(BridgeToHost::Ready(ready))) = decode_frame(frame, Reads::Core) {
+                return Some(ready.core.mac);
             }
         }
     }
@@ -702,7 +706,8 @@ struct Attempt {
     /// The port was opened, as against refused or absent. A candidate that never
     /// opened cost nothing, which is what the sweep's backoff turns on.
     opened: AtomicBool,
-    /// A `Ready` has arrived, so this board is the bridge.
+    /// A `Ready` of either kind has arrived, so this board is the bridge: it answered, whether or
+    /// not this host reads the rest of what it says.
     announced: AtomicBool,
     /// Frames that would not decode. A board running node firmware talks
     /// constantly and none of it is a frame, which is what this counts.
@@ -876,12 +881,13 @@ async fn connect(
         .name(format!("wartui-serial-rx {path}"))
         .spawn({
             let events = plumbing.events.clone();
+            let compatibility = plumbing.compatibility.clone();
             let state = Arc::clone(state);
             let memory = memory.clone();
             let hold = hold.clone();
             move || {
                 // Takes the port, and closes it on return, before the hold goes.
-                let reason = read_loop(port, &events, &state, &memory);
+                let reason = read_loop(port, &events, &compatibility, &state, &memory);
                 drop(hold);
                 let _ = dead_tx.blocking_send(reason);
             }
@@ -991,7 +997,13 @@ async fn connect(
                 }
             }
             _ = keepalive.tick(), if state.announced.load(Ordering::Relaxed) => {
-                let keep = Outgoing { cmd: HostToBridge::GetStatus, counted: false };
+                // The frozen `Identify` is the frame every bridge decodes (`KEEPALIVE`).
+                let cmd = if plumbing.compatibility.incompatible().is_some() {
+                    HostToBridge::Identify
+                } else {
+                    HostToBridge::GetStatus
+                };
+                let keep = Outgoing { cmd, counted: false };
                 if write_tx.send(keep).is_err() {
                     break Err("writer stopped".to_owned());
                 }
@@ -1107,11 +1119,12 @@ fn describe_garbled(frame: &[u8], read_len: usize, offset: usize, prev_ok: Optio
 fn read_loop<R: Read>(
     port: R,
     events: &mpsc::Sender<LinkEvent>,
+    compatibility: &Compatibility,
     state: &Attempt,
     memory: &BridgeMemory,
 ) -> String {
     let mut gate = Gate::new();
-    let reason = read_frames(port, events, state, memory, &mut gate);
+    let reason = read_frames(port, events, compatibility, state, memory, &mut gate);
     // Said when the `Ready` arrives otherwise. A connection that ends without one shows
     // what it heard here.
     if !state.announced.load(Ordering::Relaxed) && gate.skipped() > 0 {
@@ -1121,10 +1134,11 @@ fn read_loop<R: Read>(
 }
 
 /// [`read_loop`]'s body: what decodes goes through this connection's [`Gate`], which drops
-/// what arrives ahead of the first `Ready` (`crate::gate`).
+/// what arrives ahead of the first `Ready` (`crate::gate`). Each `Ready` sets `compatibility`.
 fn read_frames<R: Read>(
     mut port: R,
     events: &mpsc::Sender<LinkEvent>,
+    compatibility: &Compatibility,
     state: &Attempt,
     memory: &BridgeMemory,
     gate: &mut Gate,
@@ -1154,40 +1168,41 @@ fn read_frames<R: Read>(
                 raw.clear();
                 raw.extend_from_slice(frame);
             }
-            let decoded = decode_frame::<BridgeToHost>(frame);
+            let decoded = decode_frame(frame, gate.reads());
             let prev = prev_ok.replace(decoded.is_ok());
             let event = match decoded {
-                Ok(msg) => match gate.admit(msg, Instant::now()) {
+                Ok(Some(msg)) => match gate.admit(msg, Instant::now()) {
                     Admitted::Ready { info, fresh, .. } => {
-                        state.announced.store(true, Ordering::Relaxed);
-                        // Read by the sweep, which stops here and holds this board for
-                        // the rest of the run rather than reaching for another. The
-                        // address is remembered here rather than when the connection
-                        // ends, because `run`'s view saves it while the capture goes on,
-                        // and a connection held for the whole run ends only after the
-                        // view has stopped.
-                        let first = state
-                            .mac
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .replace(info.mac)
-                            .is_none();
-                        if first {
-                            memory.remember_on(info.mac, state.serial.clone());
+                        prove(state, memory, info.mac);
+                        compatibility.heard(&info.core());
+                        // Another answer to an `Identify` is the same life, reported as a
+                        // repeat. A new life under a held connection is a C6 that restarted,
+                        // or a P4 that rebooted and was asked again by the next host frame,
+                        // while the CH343 stayed on the bus.
+                        if fresh {
+                            LinkEvent::Connected(info)
+                        } else {
+                            LinkEvent::Again(info.core())
                         }
-                        // A second answer to an `Identify` sent before the first came back
-                        // is the same life. A new life under a held connection is a C6 that
-                        // restarted, or a P4 that rebooted and was asked again by the next
-                        // host frame, while the CH343 stayed on the bus.
-                        if !fresh {
-                            continue;
-                        }
-                        LinkEvent::Connected(info)
+                    }
+                    // A bridge whose rest this host cannot read. Its address is in the frozen
+                    // core, so it proves the board as any `Ready` does: it answered.
+                    Admitted::Unread { core, fresh } => {
+                        prove(state, memory, core.mac);
+                        let core = BridgeCore::unread(&core);
+                        compatibility.heard(&core);
+                        LinkEvent::Incompatible { core, fresh }
                     }
                     Admitted::Message(msg) => LinkEvent::Message(msg),
                     // Written before the connection, out of the CH343's or the tty's buffer.
                     Admitted::Stale => continue,
                 },
+                // A sound frame of a code this host does not read: a later build's message, or
+                // any but the core's from a bridge not yet known to be readable.
+                Ok(None) => {
+                    tracing::debug!("skipped a frame this host does not read");
+                    continue;
+                }
                 // The bootloader's log after a reset and half-frames land here; the
                 // framing has already resynchronized, so this is a counter rather than a
                 // fault. At `debug`, or a bad cable writes the log as fast as the bridge
@@ -1211,6 +1226,20 @@ fn read_frames<R: Read>(
         "link closed".to_owned()
     } else {
         "bridge never announced itself".to_owned()
+    }
+}
+
+/// A `Ready` from `mac` arrived: the board is the bridge.
+///
+/// Read by the sweep, which stops here and holds this board for the rest of the run rather than
+/// reaching for another. The address is remembered here rather than when the connection ends,
+/// because `run`'s view saves it while the capture goes on, and a connection held for the whole
+/// run ends only after the view has stopped.
+fn prove(state: &Attempt, memory: &BridgeMemory, mac: Mac) {
+    state.announced.store(true, Ordering::Relaxed);
+    let first = state.mac.lock().unwrap_or_else(|e| e.into_inner()).replace(mac).is_none();
+    if first {
+        memory.remember_on(mac, state.serial.clone());
     }
 }
 
@@ -1336,10 +1365,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use tokio::sync::mpsc;
-    use wartui_proto::bus::{NodeBoard, Slot};
+    use wartui_proto::bus::{NodeBoard, Slot, Version};
     use wartui_proto::link::{
-        BridgeToHost, FromNodeBody, HostToBridge, LoopPhase, MAX_FRAME, MAX_HOST_FRAME, ShortStr,
-        encode_frame,
+        BRIDGE_TO_HOST_CODES, BRIDGE_VERSION, BridgeToHost, End, FRAME_VERSION, FromNodeBody,
+        HostToBridge, LoopPhase, MAX_FRAME, MAX_HOST_FRAME, Ready, ReadyCore, ReadyRest, ShortStr,
+        Standing, Trial, crc16, encode_frame,
     };
     use wartui_proto::reset::ResetCause;
 
@@ -1348,9 +1378,9 @@ mod tests {
         describe_garbled, held_in, identify, is_a_new_life, is_remembered_port, patience,
         port_closed, read_loop, register_in, silence_disowns_it, write_loop,
     };
-    use crate::LinkEvent;
     use crate::remember::BridgeMemory;
     use crate::wire::encode_for_wire;
+    use crate::{Compatibility, LinkEvent};
 
     use crate::ports::{CH343_PID, CH343_VID, PortCandidate, candidate};
 
@@ -1532,16 +1562,29 @@ mod tests {
     }
 
     fn ready() -> BridgeToHost {
-        BridgeToHost::Ready {
-            mac: [1, 2, 3, 4, 5, 6],
-            fw_version: ShortStr::new(),
-            reset_cause: ResetCause::PowerOn,
-            last_phase: LoopPhase::Unknown,
-            uptime_ms: 0,
-            node_board: NodeBoard::NoCarrier,
-            radio: None,
-            image: None,
-        }
+        up(BRIDGE_VERSION, [1, 2, 3, 4, 5, 6], 0)
+    }
+
+    /// A `Ready` from a bridge on `version` at `mac`, `uptime_ms` into its life.
+    fn up(version: Version, mac: [u8; 6], uptime_ms: u32) -> BridgeToHost {
+        BridgeToHost::Ready(Ready {
+            core: ReadyCore { mac, image: [0; 32], version, trial: Trial::Settled, uptime_ms },
+            rest: Some(ReadyRest {
+                fw_version: ShortStr::new(),
+                reset_cause: ResetCause::PowerOn,
+                last_phase: LoopPhase::Unknown,
+                node_board: NodeBoard::NoCarrier,
+                radio: None,
+            }),
+        })
+    }
+
+    /// A bridge one major past this host's.
+    const NEXT_MAJOR: Version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+
+    /// What a link's handle would share with the reader.
+    fn heard() -> Compatibility {
+        Compatibility::default()
     }
 
     #[test]
@@ -1552,7 +1595,13 @@ mod tests {
 
         let (events, mut received) = mpsc::channel(8);
         let state = Attempt::default();
-        read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+        read_loop(
+            Bytes(std::io::Cursor::new(bytes)),
+            &events,
+            &heard(),
+            &state,
+            &BridgeMemory::none(),
+        );
 
         assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
         assert!(matches!(
@@ -1561,6 +1610,69 @@ mod tests {
         ));
         assert!(received.try_recv().is_err());
         assert!(state.announced.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn serial_reader_reports_incompatible_when_ready_is_from_another_major() {
+        // The bridge answered, so it is proven, and its other messages are skipped unread: no
+        // garble each, so they never pass a probe's limit.
+        let mac = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
+        let mut bytes = frame(&up(NEXT_MAJOR, mac, 500));
+        bytes.extend(frame(&rx(20)));
+        bytes.extend(frame(&rx(30)));
+
+        let (events, mut received) = mpsc::channel(8);
+        let state = Attempt::default();
+        let compatibility = heard();
+        let bytes = Bytes(std::io::Cursor::new(bytes));
+        read_loop(bytes, &events, &compatibility, &state, &BridgeMemory::none());
+
+        let Ok(LinkEvent::Incompatible { core, fresh: true }) = received.try_recv() else {
+            panic!("not reported incompatible")
+        };
+        assert_eq!((core.mac, core.version), (mac, NEXT_MAJOR));
+        assert_eq!(core.standing, Standing::Apart { older: End::Host });
+        assert!(received.try_recv().is_err(), "nothing else passed on");
+        assert!(state.announced.load(Ordering::Relaxed), "it answered");
+        assert_eq!(*state.mac.lock().unwrap(), Some(mac), "the board is proven");
+        assert_eq!(state.garbled.load(Ordering::Relaxed), 0);
+        assert_eq!(compatibility.incompatible(), Some(core), "the sends follow it");
+    }
+
+    #[test]
+    fn serial_reader_skips_frame_when_code_is_past_last_known() {
+        // A later minor's message, once the bridge has announced itself readable.
+        let mut bytes = frame(&ready());
+        let mut body = vec![FRAME_VERSION, BRIDGE_TO_HOST_CODES, 1, 2];
+        let crc = crc16(&body);
+        body.extend(crc.to_le_bytes());
+        // COBS by hand, for a body this short: each run of non-zero bytes behind its length.
+        let mut later = Vec::new();
+        for run in body.split(|&b| b == 0) {
+            later.push(u8::try_from(run.len() + 1).unwrap());
+            later.extend_from_slice(run);
+        }
+        later.push(0);
+        bytes.extend(later);
+        bytes.extend(frame(&rx(20)));
+
+        let (events, mut received) = mpsc::channel(8);
+        let state = Attempt::default();
+        read_loop(
+            Bytes(std::io::Cursor::new(bytes)),
+            &events,
+            &heard(),
+            &state,
+            &BridgeMemory::none(),
+        );
+
+        assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(LinkEvent::Message(BridgeToHost::FromNode { rx_us: 20, .. }))
+        ));
+        assert!(received.try_recv().is_err());
+        assert_eq!(state.garbled.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1576,7 +1688,13 @@ mod tests {
 
         let (events, mut received) = mpsc::channel(8);
         let state = Attempt::default();
-        read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+        read_loop(
+            Bytes(std::io::Cursor::new(bytes)),
+            &events,
+            &heard(),
+            &state,
+            &BridgeMemory::none(),
+        );
 
         assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
         assert!(matches!(received.try_recv(), Ok(LinkEvent::Garbled(_))));
@@ -1615,7 +1733,13 @@ mod tests {
 
         let (events, mut received) = mpsc::channel(8);
         let state = Attempt::default();
-        read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+        read_loop(
+            Bytes(std::io::Cursor::new(bytes)),
+            &events,
+            &heard(),
+            &state,
+            &BridgeMemory::none(),
+        );
 
         assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
         assert!(matches!(received.try_recv(), Ok(LinkEvent::Message(BridgeToHost::Error { .. }))));
@@ -1630,8 +1754,13 @@ mod tests {
 
         let (events, mut received) = mpsc::channel(8);
         let state = Attempt::default();
-        let reason =
-            read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+        let reason = read_loop(
+            Bytes(std::io::Cursor::new(bytes)),
+            &events,
+            &heard(),
+            &state,
+            &BridgeMemory::none(),
+        );
 
         assert!(received.try_recv().is_err(), "nothing passed on");
         assert!(!state.announced.load(Ordering::Relaxed));
@@ -1642,26 +1771,20 @@ mod tests {
     fn serial_link_reports_new_life_when_p4_reboots_under_held_connection() {
         // The CH343 stays on the bus, so the reboot arrives on the same connection: the
         // bootloader's log at the wrong rate, then a `Ready` whose uptime fell.
-        let up = |uptime_ms| match ready() {
-            BridgeToHost::Ready { mac, fw_version, reset_cause, .. } => BridgeToHost::Ready {
-                mac,
-                fw_version,
-                reset_cause,
-                last_phase: LoopPhase::Unknown,
-                uptime_ms,
-                node_board: NodeBoard::NoCarrier,
-                radio: None,
-                image: None,
-            },
-            _ => unreachable!(),
-        };
+        let up = |uptime_ms| up(BRIDGE_VERSION, [1, 2, 3, 4, 5, 6], uptime_ms);
         let mut bytes = frame(&up(50_000));
         bytes.extend([0x00, 0xF0, 0x80, 0xFE, 0x00, 0x13, 0x77, 0x00]);
         bytes.extend(frame(&up(120)));
 
         let (events, mut received) = mpsc::channel(8);
         let state = Attempt::default();
-        read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+        read_loop(
+            Bytes(std::io::Cursor::new(bytes)),
+            &events,
+            &heard(),
+            &state,
+            &BridgeMemory::none(),
+        );
 
         let lives: Vec<u32> = std::iter::from_fn(|| received.try_recv().ok())
             .filter_map(|event| match event {
@@ -1670,6 +1793,29 @@ mod tests {
             })
             .collect();
         assert_eq!(lives, [50_000, 120]);
+    }
+
+    #[test]
+    fn serial_reader_reports_again_when_same_life_answers_twice() {
+        // An update polls `Identify` and reads each answer.
+        let up = |uptime_ms| up(BRIDGE_VERSION, [0x02, 0, 0x5E, 0x10, 0x44, 0xC0], uptime_ms);
+        let mut bytes = frame(&up(50_000));
+        bytes.extend(frame(&up(50_010)));
+
+        let (events, mut received) = mpsc::channel(8);
+        let state = Attempt::default();
+        read_loop(
+            Bytes(std::io::Cursor::new(bytes)),
+            &events,
+            &heard(),
+            &state,
+            &BridgeMemory::none(),
+        );
+
+        assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
+        let Ok(LinkEvent::Again(core)) = received.try_recv() else { panic!("not a repeat") };
+        assert_eq!(core.uptime_ms, 50_010);
+        assert!(received.try_recv().is_err());
     }
 
     /// A port that hands out its bytes, then times out, and keeps what is written to it.
@@ -1714,6 +1860,14 @@ mod tests {
         let mut asked = [0u8; MAX_HOST_FRAME + 1];
         let n = encode_for_wire(&HostToBridge::Identify, true, &mut asked).unwrap();
         assert_eq!(port.written, &asked[..n]);
+    }
+
+    #[test]
+    fn serial_probe_names_bridge_when_ready_is_from_another_major() {
+        // The address is in the frozen core, so a bridge on any build names itself.
+        let mac = [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0];
+        let mut port = FakePort::answering(frame(&up(NEXT_MAJOR, mac, 0)));
+        assert_eq!(identify(&mut port, WAIT, WAIT), Some(mac));
     }
 
     #[test]

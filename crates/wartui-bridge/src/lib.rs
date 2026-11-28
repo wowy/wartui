@@ -9,13 +9,15 @@
 //! through its C6 ([`ble`]). A Bluetooth scan finds a bridge by the id it advertises, its last two
 //! octets, and never by its name, which is a label for a person and free to change. Both admit
 //! what the bridge sends through one rule, that a connection starts at its first `Ready`
-//! (`gate`). They differ where the links do. Both ask with `Identify`
-//! until a `Ready` answers. USB also sends a keepalive, since the P4's USB gate closes after 15 s
-//! of silence; a Bluetooth subscription is the attachment and that gate never closes on silence,
-//! so Bluetooth sends none. A Bluetooth write is a fragment of the stream, so each connection's
-//! first starts with a `0x00` to end any partial frame. And over Bluetooth, the P4's notice that a
-//! USB host took the bridge reads as the link going down, with the central still subscribed for
-//! the handback.
+//! (`gate`). A later `Ready` of the same life goes up as [`LinkEvent::Again`], since an update
+//! reads its outcome from the answers to its `Identify` polls. They differ where the links do.
+//! Both ask with `Identify` until a `Ready` answers. USB also sends a keepalive, since the P4's
+//! USB gate closes after 15 s of silence: a `GetStatus`, or an `Identify` toward an incompatible
+//! bridge, which decodes no other host frame. A Bluetooth subscription is the attachment and that
+//! gate never closes on silence, so Bluetooth sends none. A Bluetooth write is a fragment of the
+//! stream, so each connection's first starts with a `0x00` to end any partial frame. And over
+//! Bluetooth, the P4's notice that a USB host took the bridge reads as the link going down, with
+//! the central still subscribed for the handback.
 //!
 //! **A Bluetooth link is closed before the process exits.** The bridge serves a central for as
 //! long as it stays subscribed, and a process that exits with the link up leaves BlueZ connected
@@ -37,6 +39,17 @@
 //! `wartui reset` writes before any `Ready`. A transport outside this crate builds its link with
 //! [`link_pair`] or [`link_pair_awaited`].
 //!
+//! **An incompatible bridge gets the frozen core alone.** A `Ready` whose rest this host did not
+//! read, another major or a rest that does not decode, goes up as [`LinkEvent::Incompatible`] and
+//! starts no connection. The bridge shares only the frozen messages with this host, so while the
+//! last `Ready` heard was one of these, [`LinkHandle`]'s sends refuse every command but
+//! `Identify`, `Reset` and `Update` ([`SendError::Incompatible`]). The rule is held in one
+//! [`Compatibility`] that the transport sets from each `Ready` and the handle reads, never in the
+//! connection: over USB the CH343 holds the connection through an update, so a bridge turns
+//! compatible, or incompatible, under it. It outlives a disconnect, since the bridge is the same
+//! until a `Ready` says otherwise, and before the first `Ready` nothing is refused: `wartui reset`
+//! sends `Reset` blind.
+//!
 //! It also owns what the OS says a serial port is, in [`ports`], with no judgment about which of
 //! them is a bridge, so anything else that opens a device reads the same description. The USB
 //! transport reaches the ports through [`pipe::Ports`], so its protocol is one code path whatever
@@ -57,13 +70,16 @@ pub mod spec;
 pub mod wire;
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
-use wartui_proto::bus::NodeBoard;
-use wartui_proto::link::{BridgeToHost, HostToBridge, LinkError, LoopPhase, RadioInfo};
+use wartui_proto::bus::{NodeBoard, Version};
+use wartui_proto::link::{
+    BRIDGE_VERSION, BridgeToHost, HostToBridge, LinkError, LoopPhase, RadioInfo, Ready, ReadyCore,
+    ReadyRest, ShortStr, Standing, Trial,
+};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::reset::ResetCause;
@@ -118,6 +134,112 @@ pub struct BridgeInfo {
     /// installed image from a rollback. `None` when the P4 cannot read one: its partition
     /// table did not read, or the image carries no appended digest.
     pub image: Option<[u8; DIGEST_LEN]>,
+    /// The P4 firmware's version (`wartui_proto::link::BRIDGE_VERSION`'s, on a bridge from this
+    /// tree).
+    pub version: Version,
+    /// Where the booted image's trial stands.
+    pub trial: Trial,
+}
+
+impl BridgeInfo {
+    /// The bridge a `Ready` with this `core` and `rest` announces.
+    #[must_use]
+    pub fn from_ready(core: &ReadyCore, rest: ReadyRest) -> Self {
+        Self {
+            mac: core.mac,
+            fw_version: rest.fw_version.as_str().to_owned(),
+            reset_cause: rest.reset_cause,
+            last_phase: rest.last_phase,
+            uptime_ms: core.uptime_ms,
+            node_board: rest.node_board,
+            radio: rest.radio,
+            image: core.image(),
+            version: core.version,
+            trial: core.trial,
+        }
+    }
+
+    /// How this bridge stands against the host this tree builds: [`Standing::Same`], or
+    /// [`Standing::Fewer`] for another minor, since this host read its rest.
+    #[must_use]
+    pub const fn standing(&self) -> Standing {
+        Standing::of(self.version, BRIDGE_VERSION, true)
+    }
+
+    /// What its `Ready`'s frozen core says, which every bridge answers with.
+    #[must_use]
+    pub const fn core(&self) -> BridgeCore {
+        BridgeCore {
+            mac: self.mac,
+            image: self.image,
+            version: self.version,
+            trial: self.trial,
+            uptime_ms: self.uptime_ms,
+            standing: self.standing(),
+        }
+    }
+
+    /// The `Ready` this bridge announces itself with, `uptime_ms` into its life.
+    #[must_use]
+    pub fn ready(&self, uptime_ms: u32) -> Ready {
+        Ready {
+            core: ReadyCore {
+                mac: self.mac,
+                image: self.image.unwrap_or([0; DIGEST_LEN]),
+                version: self.version,
+                trial: self.trial,
+                uptime_ms,
+            },
+            rest: Some(ReadyRest {
+                fw_version: ShortStr::try_from(self.fw_version.as_str()).unwrap_or_default(),
+                reset_cause: self.reset_cause,
+                last_phase: self.last_phase,
+                node_board: self.node_board,
+                radio: self.radio.clone(),
+            }),
+        }
+    }
+}
+
+/// What a `Ready`'s frozen core says of the bridge: the fields an update's outcome is read from,
+/// and how the bridge stands against this host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BridgeCore {
+    /// The bridge's MAC.
+    pub mac: Mac,
+    /// The digest appended to the P4's booted image, `None` when it cannot read one.
+    pub image: Option<[u8; DIGEST_LEN]>,
+    /// The P4 firmware's version.
+    pub version: Version,
+    /// Where the booted image's trial stands.
+    pub trial: Trial,
+    /// How long the bridge had been up when it sent the `Ready`.
+    pub uptime_ms: u32,
+    /// How the bridge stands against [`BRIDGE_VERSION`], as its `Ready` read.
+    pub standing: Standing,
+}
+
+impl BridgeCore {
+    /// The core of a `Ready` whose rest this host did not read: another major, or a rest that did
+    /// not decode.
+    #[must_use]
+    pub fn unread(core: &ReadyCore) -> Self {
+        Self {
+            mac: core.mac,
+            image: core.image(),
+            version: core.version,
+            trial: core.trial,
+            uptime_ms: core.uptime_ms,
+            standing: Standing::of(core.version, BRIDGE_VERSION, false),
+        }
+    }
+
+    /// Whether this host reads every message both ends know: [`Standing::Same`] or
+    /// [`Standing::Fewer`]. Any other bridge shares the frozen core alone.
+    #[must_use]
+    pub const fn compatible(&self) -> bool {
+        matches!(self.standing, Standing::Same | Standing::Fewer { .. })
+    }
 }
 
 /// Something that happened on the link.
@@ -131,6 +253,19 @@ pub struct BridgeInfo {
 pub enum LinkEvent {
     /// A bridge came up and its protocol version was accepted.
     Connected(BridgeInfo),
+    /// A `Ready` from a life this connection has already reported: an answer to another
+    /// `Identify`. It starts nothing; a caller that asked reads the bridge's state from it.
+    Again(BridgeCore),
+    /// A `Ready` whose rest this host did not read: a bridge on another major, or on this major
+    /// with a rest that does not decode ([`BridgeCore::standing`]). Sent for each such `Ready`, on
+    /// a connection announced or not. It starts no connection and ends any announcement: this
+    /// host shares the frozen core alone with the bridge ([`SendError::Incompatible`]).
+    Incompatible {
+        /// What the frozen core says.
+        core: BridgeCore,
+        /// A life this connection has not seen yet.
+        fresh: bool,
+    },
     /// The link went away, or is up and not serving this host ([`DisconnectCause`] says which).
     /// The transport keeps trying to reconnect.
     Disconnected {
@@ -145,6 +280,20 @@ pub enum LinkEvent {
     /// A frame arrived that could not be decoded. Counted rather than fatal:
     /// resets and cable events produce these, and the framing recovers.
     Garbled(LinkError),
+}
+
+impl LinkEvent {
+    /// The core of the `Ready` this event carries, and whether it is a new life: `Connected` is
+    /// one, `Again` is not, and `Incompatible` says. `None` for any other event.
+    #[must_use]
+    pub fn ready(&self) -> Option<(BridgeCore, bool)> {
+        match self {
+            Self::Connected(info) => Some((info.core(), true)),
+            Self::Again(core) => Some((*core, false)),
+            Self::Incompatible { core, fresh } => Some((*core, *fresh)),
+            _ => None,
+        }
+    }
 }
 
 /// Why a link is down, as far as the transport can tell. Only the Bluetooth transport names a
@@ -315,12 +464,51 @@ pub enum SendError {
     /// rather than blocking the engine.
     #[error("command queue full")]
     Full,
+    /// The last `Ready` heard was this bridge's, whose rest this host did not read, so it takes
+    /// `Identify`, `Reset` and `Update` alone ([`Compatibility`]).
+    #[error("the bridge shares only the frozen core with this host")]
+    Incompatible(BridgeCore),
+}
+
+/// Whether the last `Ready` a link heard left its rest unread, shared by the transport, which
+/// sets it from each `Ready` ([`Self::heard`]), and the [`LinkHandle`], whose sends obey it.
+///
+/// Held apart from any one connection, so it outlives a disconnect: the bridge on the other end
+/// is the same until a `Ready` says otherwise. Before the first `Ready` it holds nothing, and
+/// nothing is refused.
+#[derive(Debug, Clone, Default)]
+pub struct Compatibility(Arc<Mutex<Option<BridgeCore>>>);
+
+impl Compatibility {
+    /// A `Ready` with `core` arrived: the link is incompatible when the core says so, and
+    /// compatible when it does not.
+    pub fn heard(&self, core: &BridgeCore) {
+        *self.lock() = (!core.compatible()).then_some(*core);
+    }
+
+    /// The core of the last `Ready` heard, while it was one this host could not read.
+    #[must_use]
+    pub fn incompatible(&self) -> Option<BridgeCore> {
+        *self.lock()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<BridgeCore>> {
+        // The value is written whole, so a panic elsewhere leaves nothing torn.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Whether `cmd` is one of the frozen messages, which every bridge that carries the core reads.
+const fn is_frozen(cmd: &HostToBridge) -> bool {
+    matches!(cmd, HostToBridge::Identify | HostToBridge::Reset | HostToBridge::Update(_))
 }
 
 /// The engine's end of the link.
 ///
 /// A transport announces a bridge once per life, as [`LinkEvent::Connected`], so the handle keeps
-/// the announcement it has read ([`LinkHandle::announced`]) for whoever holds it next.
+/// the announcement it has read ([`LinkHandle::announced`]) for whoever holds it next, and the core
+/// of the last `Ready` it has read, of any kind ([`LinkHandle::reached`]). Toward an incompatible
+/// bridge its sends take the frozen messages alone ([`SendError::Incompatible`]).
 #[derive(Debug)]
 pub struct LinkHandle {
     events: mpsc::Receiver<LinkEvent>,
@@ -332,9 +520,17 @@ pub struct LinkHandle {
     written: watch::Receiver<u64>,
     /// Ends when a transport that must finish before exit has finished; `None` for the rest.
     running: Option<Finished>,
-    /// The bridge the link has announced now: the last `Connected` read, until a
-    /// `Disconnected` or the transport's end.
+    /// The bridge the link has announced now: the last `Connected` read, until an
+    /// `Incompatible`, a `Disconnected` or the transport's end.
     announced: Option<BridgeInfo>,
+    /// The core of the last `Ready` read, `Connected`, `Again` or `Incompatible`, until a
+    /// `Disconnected` or the transport's end.
+    reached: Option<BridgeCore>,
+    /// The core of the last `Incompatible` read, until a `Connected`: kept through a
+    /// `Disconnected`, since the bridge is the same until a readable `Ready` says otherwise.
+    unread: Option<BridgeCore>,
+    /// Whether the last `Ready` the transport heard went unread, which [`Self::try_send`] obeys.
+    compatibility: Compatibility,
 }
 
 impl LinkHandle {
@@ -354,18 +550,60 @@ impl LinkHandle {
     pub async fn recv(&mut self) -> Option<LinkEvent> {
         let event = self.events.recv().await;
         match &event {
-            Some(LinkEvent::Connected(info)) => self.announced = Some(info.clone()),
-            Some(LinkEvent::Disconnected { .. }) | None => self.announced = None,
+            Some(LinkEvent::Connected(info)) => {
+                self.announced = Some(info.clone());
+                self.reached = Some(info.core());
+                self.unread = None;
+            }
+            Some(LinkEvent::Again(core)) => self.reached = Some(*core),
+            // The life announced is gone: the bridge rebooted into a build this host cannot read.
+            Some(LinkEvent::Incompatible { core, .. }) => {
+                self.announced = None;
+                self.reached = Some(*core);
+                self.unread = Some(*core);
+            }
+            Some(LinkEvent::Disconnected { .. }) | None => {
+                self.announced = None;
+                self.reached = None;
+            }
             Some(LinkEvent::Message(_) | LinkEvent::Garbled(_)) => {}
         }
         event
     }
 
     /// The bridge the link has announced now, as [`Self::recv`] has read it: the last
-    /// `Connected`, or `None` once a `Disconnected` or the transport's end follows it.
+    /// `Connected`, or `None` once an `Incompatible`, a `Disconnected` or the transport's end
+    /// follows it. A bridge that rebooted into a build this host cannot read announces nothing.
     #[must_use]
     pub fn announced(&self) -> Option<&BridgeInfo> {
         self.announced.as_ref()
+    }
+
+    /// The core of the last `Ready` [`Self::recv`] has read, a new life's, a repeat's or an
+    /// incompatible bridge's, or `None` once a `Disconnected` or the transport's end follows it:
+    /// the bridge reached now.
+    #[must_use]
+    pub fn reached(&self) -> Option<&BridgeCore> {
+        self.reached.as_ref()
+    }
+
+    /// The core of the last `Incompatible` [`Self::recv`] has read, until it reads a `Connected`.
+    /// Unlike [`Self::reached`] it outlives a `Disconnected` and the transport's end: the bridge
+    /// on the other end is the one this host knows it cannot read until a readable `Ready` says
+    /// otherwise. Unlike [`Self::incompatible`] it moves only as the handle reads, so a link
+    /// nothing has read yet holds nothing, however fast its transport heard a `Ready`. A capture
+    /// and the wait for a `Ready` refuse by it.
+    #[must_use]
+    pub fn heard_incompatible(&self) -> Option<&BridgeCore> {
+        self.unread.as_ref()
+    }
+
+    /// The core of the last `Ready` the transport heard, while it was one whose rest this host
+    /// did not read; the sends then refuse all but the frozen messages. Read from the transport,
+    /// so it can lead [`Self::recv`] and [`Self::heard_incompatible`].
+    #[must_use]
+    pub fn incompatible(&self) -> Option<BridgeCore> {
+        self.compatibility.incompatible()
     }
 
     /// Queue a command that answers a node's heartbeat.
@@ -374,7 +612,8 @@ impl LinkHandle {
     /// must keep running rather than wait on it.
     ///
     /// # Errors
-    /// [`SendError`] if the queue is full or the link has closed.
+    /// [`SendError`] if the queue is full, the link has closed, or the bridge is incompatible and
+    /// `cmd` is not a frozen message.
     pub fn send_urgent(&self, cmd: HostToBridge) -> Result<(), SendError> {
         self.try_send(&self.urgent, cmd)
     }
@@ -382,7 +621,7 @@ impl LinkHandle {
     /// Queue a command that can wait behind urgent traffic.
     ///
     /// # Errors
-    /// [`SendError`] if the queue is full or the link has closed.
+    /// As [`Self::send_urgent`].
     pub fn send_bulk(&self, cmd: HostToBridge) -> Result<(), SendError> {
         self.try_send(&self.bulk, cmd)
     }
@@ -417,6 +656,12 @@ impl LinkHandle {
         tx: &mpsc::Sender<HostToBridge>,
         cmd: HostToBridge,
     ) -> Result<(), SendError> {
+        // The one place the rule is enforced, whatever sends.
+        if !is_frozen(&cmd)
+            && let Some(core) = self.compatibility.incompatible()
+        {
+            return Err(SendError::Incompatible(core));
+        }
         tx.try_send(cmd).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => SendError::Full,
             mpsc::error::TrySendError::Closed(_) => SendError::Closed,
@@ -452,6 +697,8 @@ pub struct LinkPlumbing {
     pub events: mpsc::Sender<LinkEvent>,
     /// The commands queued for the bridge.
     pub commands: CommandRx,
+    /// Set from each `Ready` the transport hears, and read by the handle's sends.
+    pub compatibility: Compatibility,
     /// Held while a transport that must finish before exit runs; dropped with it.
     _running: Option<watch::Sender<()>>,
 }
@@ -463,6 +710,7 @@ pub fn link_pair() -> (LinkHandle, LinkPlumbing) {
     let (urgent_tx, urgent_rx) = mpsc::channel(URGENT_CAPACITY);
     let (bulk_tx, bulk_rx) = mpsc::channel(BULK_CAPACITY);
     let (written_tx, written_rx) = watch::channel(0);
+    let compatibility = Compatibility::default();
     (
         LinkHandle {
             events: event_rx,
@@ -472,6 +720,9 @@ pub fn link_pair() -> (LinkHandle, LinkPlumbing) {
             written: written_rx,
             running: None,
             announced: None,
+            reached: None,
+            unread: None,
+            compatibility: compatibility.clone(),
         },
         LinkPlumbing {
             events: event_tx,
@@ -481,6 +732,7 @@ pub fn link_pair() -> (LinkHandle, LinkPlumbing) {
                 held: None,
                 written: written_tx,
             },
+            compatibility,
             _running: None,
         },
     )
@@ -590,6 +842,7 @@ impl CommandRx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wartui_proto::link::BRIDGE_VERSION;
 
     #[tokio::test]
     async fn link_handle_prioritizes_urgent_commands_when_bulk_commands_are_backlogged() {
@@ -759,6 +1012,8 @@ mod tests {
             node_board: NodeBoard::Carrier14,
             radio: None,
             image: None,
+            version: BRIDGE_VERSION,
+            trial: Trial::Settled,
         }
     }
 
@@ -772,6 +1027,21 @@ mod tests {
         handle.recv().await.expect("the announcement");
         handle.recv().await.expect("the fault");
         assert_eq!(handle.announced(), Some(&bridge()), "a message keeps it");
+    }
+
+    #[tokio::test]
+    async fn link_handle_holds_repeat_core_when_bridge_answers_again() {
+        let (mut handle, plumbing) = link_pair();
+        plumbing.events.send(LinkEvent::Connected(bridge())).await.expect("the link reads");
+        let again = BridgeCore { uptime_ms: 5_000, trial: Trial::OnTrial, ..bridge().core() };
+        plumbing.events.send(LinkEvent::Again(again)).await.expect("the link reads");
+        let first = handle.recv().await.expect("the announcement");
+        assert_eq!(first.ready(), Some((bridge().core(), true)));
+        assert_eq!(handle.reached(), Some(&bridge().core()));
+        let repeat = handle.recv().await.expect("the repeat");
+        assert_eq!(repeat.ready(), Some((again, false)));
+        assert_eq!(handle.reached(), Some(&again));
+        assert_eq!(handle.announced(), Some(&bridge()), "a repeat keeps the announcement");
     }
 
     #[tokio::test]
@@ -796,6 +1066,132 @@ mod tests {
         handle.recv().await.expect("the announcement");
         assert_eq!(handle.recv().await, None);
         assert_eq!(handle.announced(), None);
+    }
+
+    /// A bridge one major past this host's, which answered with a `Ready` whose rest went unread.
+    fn other_major() -> BridgeCore {
+        let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        BridgeCore {
+            version,
+            standing: Standing::of(version, BRIDGE_VERSION, false),
+            ..bridge().core()
+        }
+    }
+
+    /// Every command a handle could be asked to send, the frozen three first.
+    fn commands() -> (Vec<HostToBridge>, Vec<HostToBridge>) {
+        let op = wartui_proto::link::UpdateOp::from_slice(&[6, 1]).expect("an Abort fits");
+        let frozen = vec![HostToBridge::Identify, HostToBridge::Reset, HostToBridge::Update(op)];
+        let rest = vec![
+            HostToBridge::GetStatus,
+            HostToBridge::StopScan,
+            HostToBridge::StartScan { bluetooth: false },
+            HostToBridge::OpenPairing,
+        ];
+        (frozen, rest)
+    }
+
+    #[tokio::test]
+    async fn link_handle_refuses_command_when_bridge_is_incompatible() {
+        let (handle, plumbing) = link_pair();
+        plumbing.compatibility.heard(&other_major());
+        for cmd in commands().1 {
+            let refused = Err(SendError::Incompatible(other_major()));
+            assert_eq!(handle.send_bulk(cmd.clone()), refused, "{cmd:?}");
+            assert_eq!(handle.send_urgent(cmd.clone()), refused, "{cmd:?}");
+        }
+        assert_eq!(handle.queued(), 0, "nothing was queued");
+        assert_eq!(handle.incompatible(), Some(other_major()));
+    }
+
+    #[tokio::test]
+    async fn link_handle_takes_identify_reset_and_update_when_bridge_is_incompatible() {
+        let (handle, mut plumbing) = link_pair();
+        plumbing.compatibility.heard(&other_major());
+        for cmd in commands().0 {
+            handle.send_bulk(cmd.clone()).expect("a frozen message is sent");
+            assert_eq!(plumbing.commands.recv().await, Some(cmd));
+        }
+    }
+
+    #[tokio::test]
+    async fn link_handle_takes_commands_again_when_bridge_comes_back_compatible() {
+        // Over USB the connection holds while an update brings the bridge onto this major.
+        let (handle, plumbing) = link_pair();
+        plumbing.compatibility.heard(&other_major());
+        assert!(handle.send_bulk(HostToBridge::GetStatus).is_err());
+        plumbing.compatibility.heard(&bridge().core());
+        handle.send_bulk(HostToBridge::GetStatus).expect("sent again");
+        assert_eq!(handle.incompatible(), None);
+    }
+
+    #[tokio::test]
+    async fn link_handle_takes_any_command_when_no_ready_has_arrived() {
+        // `wartui reset` sends `Reset` blind, and nothing is known of the bridge yet.
+        let (handle, _plumbing) = link_pair();
+        let (frozen, rest) = commands();
+        for cmd in frozen.into_iter().chain(rest) {
+            handle.send_bulk(cmd.clone()).unwrap_or_else(|e| panic!("{cmd:?}: {e}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn link_handle_forgets_announcement_when_bridge_turns_incompatible() {
+        let (mut handle, plumbing) = link_pair();
+        plumbing.events.send(LinkEvent::Connected(bridge())).await.expect("the link reads");
+        let turned = LinkEvent::Incompatible { core: other_major(), fresh: true };
+        plumbing.events.send(turned).await.expect("the link reads");
+        handle.recv().await.expect("the announcement");
+        let event = handle.recv().await.expect("the unread `Ready`");
+        assert_eq!(event.ready(), Some((other_major(), true)));
+        assert_eq!(handle.announced(), None, "the dead life's announcement is gone");
+        assert_eq!(handle.reached(), Some(&other_major()));
+    }
+
+    #[tokio::test]
+    async fn link_handle_keeps_refusing_when_link_goes_down() {
+        // The bridge on the other end is the same until a `Ready` says otherwise.
+        let (mut handle, plumbing) = link_pair();
+        plumbing.compatibility.heard(&other_major());
+        let gone = LinkEvent::Disconnected {
+            reason: "the bridge disconnected".to_owned(),
+            cause: DisconnectCause::Other,
+        };
+        plumbing.events.send(gone).await.expect("the link reads");
+        handle.recv().await.expect("the drop");
+        assert!(handle.send_bulk(HostToBridge::GetStatus).is_err());
+    }
+
+    #[tokio::test]
+    async fn link_handle_keeps_incompatible_bridge_until_connected_when_link_drops() {
+        let (mut handle, plumbing) = link_pair();
+        let gone = || LinkEvent::Disconnected {
+            reason: "the bridge disconnected".to_owned(),
+            cause: DisconnectCause::Other,
+        };
+        let unread = LinkEvent::Incompatible { core: other_major(), fresh: true };
+        for event in [unread, gone(), LinkEvent::Connected(bridge()), gone()] {
+            plumbing.events.send(event).await.expect("the link reads");
+        }
+        assert_eq!(handle.heard_incompatible(), None, "nothing read yet");
+        handle.recv().await.expect("the unread `Ready`");
+        handle.recv().await.expect("the drop");
+        assert_eq!(handle.reached(), None);
+        assert_eq!(handle.heard_incompatible(), Some(&other_major()), "kept through the drop");
+        handle.recv().await.expect("a readable `Ready`");
+        assert_eq!(handle.heard_incompatible(), None, "cleared by a readable `Ready`");
+        handle.recv().await.expect("the next drop");
+        assert_eq!(handle.heard_incompatible(), None);
+    }
+
+    #[test]
+    fn bridge_core_reads_standing_when_ready_is_read_or_unread() {
+        assert_eq!(bridge().core().standing, Standing::Same);
+        assert!(bridge().core().compatible());
+        let minor = Version::new(BRIDGE_VERSION.major, BRIDGE_VERSION.minor + 1, 0);
+        let fewer = BridgeInfo { version: minor, ..bridge() }.core();
+        assert!(fewer.compatible(), "{:?}", fewer.standing);
+        assert!(!other_major().compatible());
     }
 
     #[tokio::test]

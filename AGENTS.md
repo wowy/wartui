@@ -127,8 +127,9 @@ the bottom one and a crate of its own.
   setting, planner and sparse node count in), `bonds` (the Bluetooth bonds the P4 keeps for its
   C6, and their records),
   `host_owner` (who holds the P4's host queue: USB, a Bluetooth central, a phone or no one), `crc`,
-  `beacon`, `hci`, `dedup`, `link`, `radio_link` (the UART packets between the P4 and its C6, and
-  their frozen core), `ble` (the GATT identity of the C6's Bluetooth host link, the id a host
+  `beacon`, `hci`, `dedup`, `link` (the host link's frames and messages, their frozen core, the
+  hand-laid `Ready`, and what the bridge firmware's version means), `radio_link` (the UART packets
+  between the P4 and its C6, and their frozen core), `ble` (the GATT identity of the C6's Bluetooth host link, the id a host
   finds a bridge by, the address its set advertises from, and the rest of the phones' set after a
   silent central),
   `wardrive_esp` (the WardriveESP protocol a phone app reads the bridge in: its frames, commands,
@@ -150,8 +151,10 @@ the bottom one and a crate of its own.
 - **`crates/wartui-bridge`** — host side of the link. Everything above talks to a `LinkHandle`
   and cannot tell a real bridge, over USB (`serial`) or Bluetooth (`ble`), from the fake
   fleet (`sim`). The two transports differ only where their links do; what a connection admits
-  from the bridge's stream is one rule both read through (`gate`), both take a bridge's name
-  (`spec`) and write host frames (`wire`) the same way (`src/lib.rs` `//!`). `wartui`'s
+  from the bridge's stream, and whether its last `Ready` was readable, is one rule both read
+  through (`gate`), and the handle's sends refuse an incompatible bridge all but the frozen
+  messages (`src/lib.rs`); both take a bridge's name (`spec`) and write host frames (`wire`) the
+  same way (`src/lib.rs` `//!`). `wartui`'s
   `main.rs::open` is the one place a link is picked. It also owns what the OS says a serial port
   is (`ports`) and the judgments made on that, so anything else that opens a device shares one
   description. Both transports are generic over the byte pipes in `pipe` (`pipe::Ports`,
@@ -167,16 +170,18 @@ the bottom one and a crate of its own.
   whether or not a view draws, and gives the link back, open, when it stops) and `ops` (what a
   front end asks a bridge outside a capture: the wait for its `Ready`, a status read, a setting
   sent and read back, the pairing window, the bonds cleared, a power-cycle, a format, the scan
-  started, and the link parked between captures, read so nothing backs up; typed, and handing
-  each fault the bridge reports to the caller) and `view` (what a fleet view shows of a
-  snapshot, decided once as plain data: the faults and their order, the notes, each node's
+  started, and the link parked between captures, read so nothing backs up; typed, handing
+  each fault the bridge reports to the caller, and refusing an incompatible bridge alike) and
+  `view` (what a fleet view shows of a snapshot, decided once as plain data: the faults and their
+  order, an incompatible bridge first, the notes, a bridge a minor apart among them, each node's
   state, the planner and the receiver, the settings in force and the bridge's answers to a
   power-cycle and a format) and `export` (a capture written as a WiGLE CSV, and what a report
   calls its nodes) and `upload` (a capture sent to WDGWars
   and WiGLE: each site's body and cutoff, the operator's consent, the send and the job followed)
   and `update` (the nodes and the bridge updated over the link: the app-only images and their
   checks, a release's image fetched against its `SHA256SUMS`, the node plan and its fleets, and
-  the bridge's update read across its reboot) and `position` (the position chain's tiers in
+  the bridge's update, stopped with `Abort` while it sends and read from `Ready` across its
+  reboot) and `position` (the position chain's tiers in
   their order, and whether the scan waits for a fix, for a desktop and a phone alike). It words
   nothing for the operator, and names no desktop I/O and no terminal.
 - **`crates/wartui-desktop`** — what only a desktop does, under those seams:
@@ -333,10 +338,6 @@ is here rather than only in a `//!`.
   `Stop`, so a change to those four layouts costs a P4 reflash too (`wartui flash-bridge`, from
   the same tree); any other node message passes through it unread and does not.
   `wartui ota` updates the nodes over the bus.
-- **`link::LINK_PROTO_VERSION` does not move before 1.0 either**: there is no older peer for it to
-  protect when the policy is to flash both ends from one tree. The cost is that a host and a bridge built from different
-  trees may meet as an undecodable frame rather than a named mismatch, which is stated where the
-  constant is.
 - **The sighting trailer means what the kind says it means, and the wire layer never interprets
   it.** For Wi-Fi it is the roaming consortium element's body verbatim; for BLE it is a flags
   byte (random address, connectable), then two bytes of company identifier when the advertiser
@@ -354,6 +355,11 @@ is here rather than only in a `//!`.
   firmware's `version` in `firmware/node/Cargo.toml` is bumped on every change: before 1.0 a minor
   bump may break the wire and a patch bump may not.
   `bus::NODE_VERSION` mirrors it, and `crates/wartui-proto/tests/version.rs` fails when they differ.
+  `firmware/p4-bridge`'s version follows semantic versioning instead, for the host link's
+  unfrozen messages: a changed message's bytes is a major, a new message a minor, and a patch
+  changes none. `link::BRIDGE_VERSION` mirrors it, `tests/version.rs` fails when they differ, and
+  `crates/wartui-proto/tests/link_messages.txt` holds every message's bytes, so a change without
+  its bump fails a test.
   The node's `trial` sector layout, which one image writes and the next reads, is frozen with the
   bus's core (`crates/wartui-proto/src/ota/trial.rs`). **No version marker but
   `store::SCHEMA_VERSION` moves until 1.0**, whatever a layout does. `bus::BUS_VERSION` names the
@@ -382,10 +388,11 @@ is here rather than only in a `//!`.
   there. It has four inputs, all the bridge's: the pool, kept in NVS and set by `SetPool`; the
   planner and its sparse node count, kept in NVS and set by `SetPlanner`; the scan mode, set by
   `StartScan { bluetooth }` and `StopScan`, or by a linked phone's session, in Wi-Fi or Bluetooth
-  mode, and kept nowhere; and a linked phone's channel list, which outranks the pool while the
-  phone holds it and is kept nowhere. Which node scans Bluetooth is its pick, not an input. The
-  host's `Command::SetPool`, `SetPlanner`, `SetBluetooth` and `StopScan` only ask, and the engine
-  believes what the next `Status` or `Fleet` report says.
+  mode, stopped too by a `Begin` the P4 takes for its own image, and kept nowhere; and a linked
+  phone's channel list, which outranks the pool while the phone holds it and is kept nowhere.
+  Which node scans Bluetooth is its pick, not an input. The host's `Command::SetPool`,
+  `SetPlanner`, `SetBluetooth` and `StopScan` only ask, and the engine believes what the next
+  `Status` or `Fleet` report says.
   → `crates/wartui-proto/src/fleet.rs` `//!`; `crates/wartui-core/src/engine/scan.rs` `//!`
 - **Only heartbeating nodes are assignable or in the plan.** The P4 plans by slot: a member is a
   present slot that has heartbeated within `fleet::HEARTBEAT_TIMEOUT_MS` (20 s), and its
@@ -488,14 +495,15 @@ edit stops; follow the pointer before changing the rule.
   `serial::select` / `serial::unambiguous_bridge`, `crates/wartui-desktop/src/discover.rs` `//!`
 - **A connection starts at its first `Ready`, on both links, and asks with `Identify` until one
   answers.** What decodes ahead of it was written before the connection and is dropped
-  (`gate`). Over USB a connection asks a CH343 every 500 ms, and any other port once. A CH343
+  (`gate`), and until a `Ready` whose rest the host reads, it decodes only the frozen messages. Over USB a connection asks a CH343 every 500 ms, and any other port once. A CH343
   drains its UART, and a P4 booting behind it loses the first `Identify`. A path named with
   `--bridge` that is not a listed CH343 may be a node, and a node that is not reading its USB
   endpoint absorbs exactly one packet and NACKs the rest, which sit in the tty's output queue
   through a `close` that no signal can interrupt — 30 s measured against a node, during which the
   process cannot exit. The transport leaves a thread held in `write` or `close` behind after 2 s,
   and `main` names the port it holds. Once proven, a USB connection that has written nothing for
-  10 s sends a `GetStatus`, since the P4 stops writing to a host it has not heard from in 15 s.
+  10 s sends a `GetStatus`, or an `Identify` toward an incompatible bridge, which decodes no other
+  host frame, since the P4 stops writing to a host it has not heard from in 15 s.
   Over Bluetooth
   a connection asks every second once its notifications are open, because a bonded central's
   subscription outlives its connection and the bridge's `Ready` can go by before the transport
@@ -550,6 +558,18 @@ edit stops; follow the pointer before changing the rule.
 - **The node bus's core is frozen, even before 1.0**, so any host and P4 can identify and update
   any node build, and a node never needs a wired flash.
   → `crates/wartui-proto/src/bus/mod.rs` `//!`
+- **The host link's core is frozen, even before 1.0**, so any later host can reach, identify,
+  update and restart any bridge that carries it. `link::FRAME_VERSION` is 2 and never moves.
+  → `crates/wartui-proto/src/link/mod.rs` `//!`
+- **A bridge on another major, or another build of this one, is incompatible: the host shares the
+  frozen core with it and nothing else.** Its `Ready`'s rest goes unread, and it is reported as
+  `LinkEvent::Incompatible`, never as a connection. Toward it the host reads `Ready` and `Update`,
+  sends `Identify`, `Reset` and `Update`, starts no capture and updates it; every other command
+  refuses it with one wording, and `flash-bridge` and a phone's `updateBridge` are the fix. A
+  bridge a minor apart is compatible and a note. The send rule is enforced once, in `LinkHandle`'s
+  sends, from a flag the transport sets from each `Ready`, since over USB a bridge turns
+  compatible under a held connection. → `crates/wartui-bridge/src/lib.rs` `//!`, `src/gate.rs`
+  `//!`; `crates/wartui-app/src/view/faults.rs` `//!`
 - **The P4's core 1 stays off.** Every future, the microSD card's included, is joined on core 0,
   and nothing calls `start_second_core`. esp-storage stalls the other core for every flash write,
   wherever it is, so a core 1 frozen holding a lock leaves core 0 spinning on it: on the bench,
@@ -571,8 +591,8 @@ edit stops; follow the pointer before changing the rule.
   Lock it per transaction, never across an await on anything but the bus, or one stalls the
   other. → `firmware/common/src/gps.rs` `//!`, `firmware/p4-bridge/src/carrier.rs` `//!`
 - **Over USB, a restart of either chip is invisible unless the host compares uptimes**, because
-  the CH343 stays on the bus through it, so the connection holds, and `Ready.uptime_ms` is the
-  C6's, which the P4 resets at its own boot. Both transports read each `Ready` through the same
+  the CH343 stays on the bus through it, so the connection holds, and the uptime in `Ready`'s
+  frozen core is the C6's, which the P4 resets at its own boot. Both transports read each `Ready` through the same
   gate, so a new life under a held connection is reported on either; over Bluetooth a restart of
   either chip also drops the link. → `crates/wartui-bridge/src/gate.rs` `//!`, `is_a_new_life`
 - **The P4 writes nothing to a host until one attaches, and queues nothing until then.** A USB
@@ -667,9 +687,12 @@ edit stops; follow the pointer before changing the rule.
   `firmware/p4-radio/src/last_panic.rs`;
   `firmware/p4-bridge/src/link.rs`, `relay`, and `src/main.rs`, `Shared::announce`
 - **Updates follow the link, and a failed one over Bluetooth is recovered over USB.**
-  `flash-bridge` and `ota` pick theirs as every command does (`link_for`). Over Bluetooth the P4's
-  reboot and its C6's update each drop the link, so `flash-bridge` reads its outcome across the
-  reconnects, and nothing resumes a partly sent image.
+  `flash-bridge` and `ota` pick theirs as every command does (`link_for`). `flash-bridge` reads
+  its outcome from the frozen `image` and `trial` of each `Ready` that answers its `Identify` polls,
+  never from a log line. Over Bluetooth the P4's reboot and its C6's update each drop the link, so
+  it reads them across the reconnects, and nothing resumes a partly sent image. An upload the host
+  gives up on before it is verified, the bridge's own image or the node image cache's, is ended
+  with `Abort` (`wartui_bridge::pace::abort`).
   → `crates/wartui-app/src/update/bridge.rs` `//!`
 - **The P4 pumps its planner after every input.** Each heartbeat, presence change, host command
   and tick is followed at once by pulling every record the core owes into its downlink. A

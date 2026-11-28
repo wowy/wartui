@@ -32,7 +32,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use wartui_app::position::{Fixed, Sources};
-use wartui_app::session::{Controls, HostBuild, Refused, Session as Capture, SessionConfig};
+use wartui_app::session::{
+    Controls, HostBuild, Refusal, Refused, Session as Capture, SessionConfig,
+};
 use wartui_app::settings::{self as app, Busy, Link as Over, SsidRefusal};
 use wartui_app::view::View;
 use wartui_core::engine::{Command, Snapshot};
@@ -40,7 +42,8 @@ use wartui_core::gps::Gps;
 use wartui_core::position::DEFAULT_MAX_AGE;
 use wartui_core::store::{StoreConfig, StoreError};
 use wartui_core::ubx;
-use wartui_proto::bus::Slot;
+use wartui_proto::bus::{Slot, Version};
+use wartui_proto::link::{BRIDGE_VERSION, Standing};
 
 use crate::feeds::{HealthFeed, LocationFeed};
 use crate::link::{Link, LinkError};
@@ -125,6 +128,11 @@ pub enum StartError {
     /// The store could not be created.
     #[error("the store did not open: {detail}")]
     Store { detail: String },
+    /// The link's bridge shares only the frozen core with this library: `bridge` is its firmware,
+    /// `host` the one this library builds, and `standing` another major or another build. No store
+    /// was created; `updateBridge` updates it.
+    #[error("the bridge {bridge:?} shares only the frozen core with this library")]
+    Incompatible { bridge: Version, host: Version, standing: Standing },
 }
 
 /// Why a stop did not end a capture.
@@ -206,9 +214,10 @@ impl Session {
     ///
     /// # Errors
     /// [`StartError::LinkInUse`] or [`StartError::LinkClosed`] for a link not idle, and
-    /// [`StartError::Exists`] or [`StartError::Store`] when the store cannot be created, which
-    /// leaves the link as it was. [`StartError::LinkClosed`] too when the start's work panicked,
-    /// which takes the link with it.
+    /// [`StartError::Exists`] or [`StartError::Store`] when the store cannot be created, and
+    /// [`StartError::Incompatible`] for a link whose bridge this library cannot capture over,
+    /// each of which leaves the link as it was. [`StartError::LinkClosed`] too when the start's
+    /// work panicked, which takes the link with it.
     #[uniffi::constructor]
     pub async fn start(
         config: CaptureConfig,
@@ -396,11 +405,18 @@ async fn start(
     let health = health.map(|feed| feed.reader());
     let capture = match Capture::start(capture, handle, announced, health, settings) {
         Ok(capture) => capture,
-        Err(Refused { error, link: handle }) => {
+        Err(Refused { reason, link: handle }) => {
             link.give_back(*handle);
-            return Err(match error {
-                StoreError::Exists(path) => StartError::Exists { path: path.display().to_string() },
-                error => StartError::Store { detail: chain(&error) },
+            return Err(match reason {
+                Refusal::Store(StoreError::Exists(path)) => {
+                    StartError::Exists { path: path.display().to_string() }
+                }
+                Refusal::Store(error) => StartError::Store { detail: chain(&error) },
+                Refusal::Incompatible(core) => StartError::Incompatible {
+                    bridge: core.version,
+                    host: BRIDGE_VERSION,
+                    standing: core.standing,
+                },
             });
         }
     };

@@ -118,10 +118,12 @@ jobs:
           cargo build --release --locked
           popd
 
+      # The table ends at 0xFF1000, past espflash's default 4 MB, so the images name 16 MB. The
+      # board's flash is 32 MB, so a 16 MB header is safe on it.
       - name: Save the merged and app images
         run: |
           elf=firmware/p4-bridge/target/riscv32imafc-unknown-none-elf/release/wartui-p4-bridge-fw
-          table=(--partition-table firmware/p4-bridge/partitions.csv)
+          table=(--partition-table firmware/p4-bridge/partitions.csv --flash-size 16mb)
           espflash save-image --skip-update-check --chip esp32p4 --merge --skip-padding \
             "${table[@]}" "$elf" wartui-p4-bridge-fw-esp32p4.bin
           espflash save-image --skip-update-check --chip esp32p4 \

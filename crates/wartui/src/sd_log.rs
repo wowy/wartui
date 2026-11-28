@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use wartui_proto::bus::{NodeBoard, UpMsg};
-use wartui_proto::link::BridgeToHost;
+use wartui_proto::link::{BridgeToHost, Ready};
 use wartui_proto::sd::log::{Bad, Body, Clock, CloseReason, Entry, Opened, decode, records};
 use wartui_proto::wardrive_esp::session::Class;
 
@@ -191,7 +191,10 @@ fn render(name: &str, file: &mut [u8], verbose: bool, lines: &mut Vec<String>) -
         };
         match &entry.body {
             Body::Opened(opened) => clock = Clock::new(opened.opened_ms),
-            Body::Frame(BridgeToHost::Ready { node_board, .. }) => board = *node_board,
+            // A `Ready` whose rest went unread leaves the last board known.
+            Body::Frame(BridgeToHost::Ready(Ready { rest: Some(rest), .. })) => {
+                board = rest.node_board;
+            }
             Body::Dropped(count) => tally.dropped += u64::from(*count),
             _ => {}
         }
@@ -332,7 +335,8 @@ mod tests {
     };
     use wartui_proto::host_owner::{Holder, Input};
     use wartui_proto::link::{
-        BridgeHealth, FromNodeBody, LINK_PROTO_VERSION, LogStr, LoopPhase, ShortStr,
+        BRIDGE_VERSION, BridgeHealth, FRAME_VERSION, FromNodeBody, LogStr, LoopPhase, ReadyCore,
+        ReadyRest, ShortStr, Trial,
     };
     use wartui_proto::radio_link::RadioHealth;
     use wartui_proto::reset::ResetCause;
@@ -442,16 +446,22 @@ mod tests {
     }
 
     fn ready() -> BridgeToHost {
-        BridgeToHost::Ready {
-            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
-            fw_version: ShortStr::try_from("0.1.0").expect("short"),
-            reset_cause: ResetCause::PowerOn,
-            last_phase: LoopPhase::Unknown,
-            uptime_ms: 5_010,
-            node_board: NodeBoard::Carrier14,
-            radio: None,
-            image: None,
-        }
+        BridgeToHost::Ready(Ready {
+            core: ReadyCore {
+                mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+                image: [0; 32],
+                version: BRIDGE_VERSION,
+                trial: Trial::Settled,
+                uptime_ms: 5_010,
+            },
+            rest: Some(ReadyRest {
+                fw_version: ShortStr::try_from("0.1.0").expect("short"),
+                reset_cause: ResetCause::PowerOn,
+                last_phase: LoopPhase::Unknown,
+                node_board: NodeBoard::Carrier14,
+                radio: None,
+            }),
+        })
     }
 
     fn log_msg(text: &str) -> BridgeToHost {
@@ -517,7 +527,7 @@ mod tests {
                 .to_owned(),
             format!(
                 "00:00:05.010  ready       02:00:5E:10:44:C0 firmware 0.1.0 link \
-                 v{LINK_PROTO_VERSION}"
+                 v{FRAME_VERSION}"
             ),
             "00:00:05.020  status      1200 received, 3 dropped, 0 oversize, up 5s · P4 —"
                 .to_owned(),

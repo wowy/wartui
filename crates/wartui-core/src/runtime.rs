@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
-use wartui_bridge::pace::PacedSender;
+use wartui_bridge::pace::{self, PacedSender};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
 use wartui_proto::bus::{DownMsg, UpType, UpdateStatus};
 use wartui_proto::fleet::ScanMode;
@@ -84,7 +84,8 @@ pub const COMMAND_QUEUE: usize = 8;
 /// its `Connected` already: a link a previous capture gave back, or one a front end waited on for
 /// the bridge's `Ready`. The transport sends `Connected` again only on a new life, so the capture
 /// takes it as its first event, through the same path as one off the link. `None` is a link not
-/// yet read from.
+/// yet read from, or one whose last `Ready` went unread ([`LinkHandle::reached`] with no
+/// [`LinkHandle::announced`]): that capture starts on the `Incompatible` the link already read.
 ///
 /// `health` is called once per host sample ([`HOST_SAMPLE`]) for the host's own health. `None`
 /// records [`Health::default`], every value unread.
@@ -121,7 +122,10 @@ pub async fn drive(
     let mut sky_lists = false;
     // Once `stop` has fired on a capture: when to give up waiting for the P4 to stop.
     let mut quitting: Option<tokio::time::Instant> = None;
-    let mut first = announced.map(|info| Event::Link(LinkEvent::Connected(info)));
+    let mut first = announced.map(|info| Event::Link(LinkEvent::Connected(info))).or_else(|| {
+        let core = link.reached().filter(|core| !core.compatible() && link.announced().is_none());
+        core.map(|&core| Event::Link(LinkEvent::Incompatible { core, fresh: false }))
+    });
 
     loop {
         let event = if let Some(event) = first.take() {
@@ -173,7 +177,11 @@ pub async fn drive(
                 engine.position().stand_down(now_ms, engine.bridge_connected());
                 continue;
             }
-            Event::Link(LinkEvent::Connected(_) | LinkEvent::Disconnected { .. }) => {
+            Event::Link(
+                LinkEvent::Connected(_)
+                | LinkEvent::Incompatible { .. }
+                | LinkEvent::Disconnected { .. },
+            ) => {
                 if let Some(gps) = &bridge_gps {
                     gps.reset_stream();
                 }
@@ -190,7 +198,12 @@ pub async fn drive(
         // disconnect counts.
         let restands = matches!(
             event,
-            Event::Tick | Event::Link(LinkEvent::Connected(_) | LinkEvent::Disconnected { .. })
+            Event::Tick
+                | Event::Link(
+                    LinkEvent::Connected(_)
+                        | LinkEvent::Incompatible { .. }
+                        | LinkEvent::Disconnected { .. }
+                )
         );
 
         let publish = matches!(
@@ -198,8 +211,9 @@ pub async fn drive(
             Event::Tick
                 | Event::Command(_)
                 | Event::Link(
-                    wartui_bridge::LinkEvent::Connected(_)
-                        | wartui_bridge::LinkEvent::Disconnected { .. }
+                    LinkEvent::Connected(_)
+                        | LinkEvent::Incompatible { .. }
+                        | LinkEvent::Disconnected { .. }
                 )
         );
 
@@ -317,7 +331,11 @@ pub enum FleetError {
 /// abort, and is the error. So is the first chunk answered `NoImage` once the image is checked
 /// ([`Failure::CacheLost`]), since every session's next chunk meets the same answer. The sessions
 /// keep their outcomes then. A `Begin` for the image the cache already holds is answered
-/// `Verified` at once, and the upload ends there.
+/// `Verified` at once, and the upload ends there. An upload left unverified, by `stop`, by its
+/// failure or by every session ending first, is ended with an `Abort` once the sessions have ended
+/// (`pace::abort`), since the P4 holds its cache session open and its SD log paused until then.
+/// One the link stopped writing is not: the `Abort` would wait behind the same stall. A verified
+/// image is never aborted: the nodes are fed from it.
 ///
 /// Every event goes to every session still running, and each reads only its own: its node's
 /// records, and the delivery answers to its own ids, which no two sessions share
@@ -351,12 +369,17 @@ pub async fn drive_fleet(
         tracing::debug!(node = %mac::full(&session.node()), phase = ?phase, "ota phase");
     }
     let mut stopped = false;
+    // The upload's session, once one is dropped before the P4 verified it: the P4 holds it open,
+    // and its SD log waits, until an `Abort` ends it.
+    let mut abandoned = None;
     while sessions.iter().any(|session| session.outcome().is_none()) {
         let mut sends = Vec::new();
         tokio::select! {
             () = &mut stop, if !stopped => {
                 stopped = true;
-                cache = None;
+                if let Some(sender) = cache.take() {
+                    abandoned = abandon(&sender);
+                }
                 let now = now();
                 for session in sessions.iter_mut() {
                     sends.extend(session.cancel(now));
@@ -419,6 +442,7 @@ pub async fn drive_fleet(
                 report(FleetReport::Cached(elapsed));
                 feed(sessions, OtaEvent::Cached, &mut sends);
             } else if let Stage::Failed(failure) = sender.stage() {
+                abandoned = abandon(sender);
                 cache = None;
                 tracing::debug!(failure = ?failure, "ota cache failed");
                 failed = Some(FleetError::Upload(failure));
@@ -470,10 +494,33 @@ pub async fn drive_fleet(
             report(FleetReport::Session(i, &now_progress));
         }
     }
+    // Every session ended before the P4 verified the upload.
+    if let Some(sender) = cache.take() {
+        abandoned = abandon(&sender);
+    }
+    if let Some(session) = abandoned {
+        let ended = pace::abort(link, session, HostToBridge::CacheImage, cache_status).await;
+        tracing::debug!(session, ended, "ota cache aborted");
+    }
     if let Some(failure) = failed {
         return Err(failure);
     }
     Ok(sessions.iter().filter_map(|session| session.outcome().cloned()).collect())
+}
+
+/// The session to end with an `Abort` for an upload given up on before the P4 verified it, or
+/// `None` when the link stopped writing it ([`PacedSender::is_stalled`]), as the `Abort` would
+/// wait behind the same stall.
+fn abandon(sender: &PacedSender<'_>) -> Option<u8> {
+    (!sender.is_stalled()).then(|| sender.session())
+}
+
+/// The status a [`BridgeToHost::CacheImage`] carries.
+fn cache_status(message: &BridgeToHost) -> Option<UpdateStatus> {
+    match message {
+        BridgeToHost::CacheImage(bytes) => pace::status_in(bytes),
+        _ => None,
+    }
 }
 
 /// Hand `event` to every session still running, gathering what they send.

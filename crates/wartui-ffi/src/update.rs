@@ -22,6 +22,11 @@
 //! link back once the work ends. The link goes back with the latest announcement it read, so
 //! after a bridge install it names the new image, and after the bridge went it names none.
 //!
+//! **A bridge this library cannot read past the frozen core is updated, and nothing else.**
+//! [`Link::update_bridge`] needs only the core the link reached, which names the running image;
+//! [`Link::hear_nodes`] and [`Link::update_nodes`] need the messages outside it, and refuse
+//! ([`UpdateError::Incompatible`]).
+//!
 //! **A plan holds its images by board.** `wartui_app::update::image::NodeImage` shares its bytes
 //! behind an `Arc`, so a [`NodeImage`] gives each plan made from it a clone of that handle, never
 //! a copy of the image.
@@ -29,13 +34,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
-use wartui_app::ops;
+use wartui_app::ops::{self, NotReady};
 use wartui_app::settings::Link as Over;
-use wartui_app::update::bridge::{self, Failed, Line, Proof, Updated};
+use wartui_app::update::bridge::{self, Failed, Line, Updated};
 use wartui_app::update::image::{
     self as app_image, Chip, ImageError as AppImageError, ImageOf, has_node_image,
 };
@@ -45,10 +49,12 @@ use wartui_app::update::nodes::{
 };
 use wartui_app::update::release::{self, BRIDGE_APP_ASSET, ReleaseError, Releases};
 use wartui_app::view::SlotShown;
-use wartui_bridge::{LinkHandle, SendError};
+use wartui_bridge::{BridgeCore, LinkHandle, SendError};
 use wartui_core::ota::{self, Failure, Outcome, Phase};
-use wartui_proto::bus::{Board, Capabilities, NodeBoard, Slot, UpdateState};
+use wartui_proto::bus::{Board, Capabilities, NodeBoard, Slot, UpdateState, Version};
+use wartui_proto::link::{BRIDGE_VERSION, Standing};
 use wartui_proto::mac::{self, Mac};
+use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::Failure as AppSenderFailure;
 
 use crate::link::{Inner, Link, LinkError};
@@ -120,15 +126,6 @@ pub enum Line {
     Fault(String),
     /// A `Log` message.
     Log(String),
-}
-
-/// How the bridge's new image is known to be confirmed.
-#[uniffi::remote(Enum)]
-pub enum Proof {
-    /// The P4's line said so.
-    Confirmed,
-    /// The line was lost, and the bridge outlived its trial watchdog.
-    OutlivedTrial,
 }
 
 /// Why an image was refused.
@@ -491,6 +488,18 @@ pub enum UpdateError {
     /// remember one.
     #[error("the link is pinned to no bridge")]
     NotPinned,
+    /// The bridge shares only the frozen core with this library, which carries no node update:
+    /// `bridge` is its firmware, `host` the one this library builds, and `standing` another major
+    /// or another build. `updateBridge` updates it first.
+    #[error("the bridge {bridge:?} shares only the frozen core with this library")]
+    Incompatible { bridge: Version, host: Version, standing: Standing },
+}
+
+impl UpdateError {
+    /// The refusal of a bridge whose last `Ready` went unread.
+    fn incompatible(core: BridgeCore) -> Self {
+        Self::Incompatible { bridge: core.version, host: BRIDGE_VERSION, standing: core.standing }
+    }
 }
 
 /// The link, lent for an update, with the announcement it holds: refused unless it takes
@@ -900,6 +909,8 @@ pub enum CutShort {
     Upload { failure: SenderFailure },
     /// The bridge lost the image after checking it.
     CacheLost,
+    /// The bridge shares only the frozen core with this library, which carries no node update.
+    Incompatible { bridge: Version, host: Version, standing: Standing },
 }
 
 impl From<AppCutShort> for CutShort {
@@ -908,6 +919,11 @@ impl From<AppCutShort> for CutShort {
             AppCutShort::BeforeStart => Self::BeforeStart,
             AppCutShort::Upload(failure) => Self::Upload { failure: failure.into() },
             AppCutShort::CacheLost => Self::CacheLost,
+            AppCutShort::Incompatible(core) => Self::Incompatible {
+                bridge: core.version,
+                host: BRIDGE_VERSION,
+                standing: core.standing,
+            },
         }
     }
 }
@@ -923,6 +939,8 @@ pub enum NodesFailed {
     Canceled,
     /// `failed` of `total` nodes did not update.
     Nodes { failed: u32, total: u32 },
+    /// The bridge shares only the frozen core with this library, which carries no node update.
+    Incompatible { bridge: Version, host: Version, standing: Standing },
 }
 
 /// `count` as a `u32`, saturating.
@@ -941,6 +959,11 @@ impl From<AppFailed> for NodesFailed {
             AppFailed::Nodes { failed, total } => {
                 Self::Nodes { failed: count(failed), total: count(total) }
             }
+            AppFailed::Incompatible(core) => Self::Incompatible {
+                bridge: core.version,
+                host: BRIDGE_VERSION,
+                standing: core.standing,
+            },
         }
     }
 }
@@ -997,6 +1020,8 @@ pub enum QueueFailure {
     Closed,
     /// The queue is full.
     Full,
+    /// The bridge shares only the frozen core with this library, and takes no other message.
+    Incompatible,
 }
 
 /// Which link an update went over.
@@ -1040,12 +1065,13 @@ pub enum BridgeUpdateFailed {
     /// The bridge came back on neither image, or one it could not name.
     #[error("came back running another image")]
     OtherImage,
-    /// The bridge runs the new image, and says confirming it failed, in its words.
-    #[error("installed, not confirmed: {why}")]
-    NotConfirmed { why: String },
-    /// The bridge runs the new image, and no confirm was seen: within `secs` of its `Ready`, or
-    /// before the wait over Bluetooth ended (`None`).
-    #[error("installed, no confirm seen")]
+    /// The bridge runs the new image, and its announcement says confirming it failed. The
+    /// bridge's own line saying why arrives as [`BridgeUpdateProgress::Said`].
+    #[error("installed, not confirmed")]
+    NotConfirmed,
+    /// The bridge runs the new image, still on trial: `secs` after its first announcement, or
+    /// when the wait over Bluetooth ended (`None`).
+    #[error("installed, still on trial")]
     NoConfirm { secs: Option<u64> },
     /// Over Bluetooth, the wait ended with no new life judged.
     #[error("the bridge did not come back")]
@@ -1053,16 +1079,17 @@ pub enum BridgeUpdateFailed {
     /// A session or another call holds the link.
     #[error("the link is in use")]
     InUse,
-    /// The link holds no announcement from the bridge, which names the image it runs: wait for
-    /// one with `ready` first.
-    #[error("no bridge has announced itself")]
+    /// The link has reached no bridge, whose `Ready` names the image it runs: wait for one with
+    /// `ready` first. A bridge `ready` refused as incompatible has been reached.
+    #[error("no bridge has answered")]
     NotAnnounced,
     /// As [`UpdateError::NotPinned`].
     #[error("the link is pinned to no bridge")]
     NotPinned,
     /// The stopper, or a phone that stopped awaiting, stopped it before
-    /// [`BridgeUpdateProgress::Installing`] was reported; from then a stop is not taken, and the
-    /// call runs to its outcome. The bridge keeps the image it runs.
+    /// [`BridgeUpdateProgress::Installing`] was reported, and the update's session on the bridge
+    /// was ended; from then a stop is not taken, and the call runs to its outcome. The bridge
+    /// keeps the image it runs.
     #[error("stopped")]
     Stopped,
 }
@@ -1081,6 +1108,7 @@ impl From<Failed> for BridgeUpdateFailed {
                 failure: match error {
                     SendError::Closed => QueueFailure::Closed,
                     SendError::Full => QueueFailure::Full,
+                    SendError::Incompatible(_) => QueueFailure::Incompatible,
                 },
             },
             Failed::NoComeBack { over, secs } => {
@@ -1093,7 +1121,8 @@ impl From<Failed> for BridgeUpdateFailed {
             Failed::NeverTookInstall => Self::NeverTookInstall,
             Failed::RolledBack => Self::RolledBack,
             Failed::OtherImage => Self::OtherImage,
-            Failed::NotConfirmed { why } => Self::NotConfirmed { why },
+            Failed::Stopped => Self::Stopped,
+            Failed::NotConfirmed => Self::NotConfirmed,
             Failed::NoConfirm { secs } => Self::NoConfirm { secs },
             Failed::NotBack => Self::NotBack,
         }
@@ -1111,8 +1140,8 @@ pub enum BridgeUpdateProgress {
     Installing,
     /// Over Bluetooth, the link dropped as the bridge restarts. Said once.
     LinkDropped,
-    /// The new image is running and confirmed, known this way.
-    Confirmed { proof: Proof },
+    /// The new image is running, and its announcement says it is confirmed.
+    Confirmed,
     /// The radio restarted on its bundled image.
     RadioRestarted,
     /// The radio's update is still running when the wait for it ends.
@@ -1128,7 +1157,7 @@ impl From<bridge::Progress> for BridgeUpdateProgress {
             bridge::Progress::Sending { percent } => Self::Sending { percent },
             bridge::Progress::Installing => Self::Installing,
             bridge::Progress::LinkDropped => Self::LinkDropped,
-            bridge::Progress::Confirmed(proof) => Self::Confirmed { proof },
+            bridge::Progress::Confirmed => Self::Confirmed,
             bridge::Progress::RadioRestarted => Self::RadioRestarted,
             bridge::Progress::RadioStillUpdating => Self::RadioStillUpdating,
             bridge::Progress::Line(line) => Self::Said { line },
@@ -1153,8 +1182,9 @@ impl Link {
     ///
     /// # Errors
     /// [`UpdateError::NotPinned`] for a Bluetooth link pinned to no bridge,
-    /// [`UpdateError::InUse`] or [`UpdateError::Closed`] for a link not idle, and
-    /// [`UpdateError::Closed`] when the transport ends while listening.
+    /// [`UpdateError::InUse`] or [`UpdateError::Closed`] for a link not idle,
+    /// [`UpdateError::Incompatible`] for a bridge this library reads only for its frozen core,
+    /// and [`UpdateError::Closed`] when the transport ends while listening.
     pub async fn hear_nodes(&self, period_ms: u32) -> Result<Arc<NodesHeard>, UpdateError> {
         let inner = self.shared();
         let period = Duration::from_millis(u64::from(period_ms));
@@ -1198,15 +1228,16 @@ impl Link {
     }
 
     /// Send `image` to the bridge over this link, wait out its reboot, and read the outcome.
-    /// Needs the bridge's announcement (`ready`), which names the image it runs. The link keeps
-    /// the latest announcement it reads, so after an install it names the new image.
+    /// Needs the bridge's `Ready`, which names the image it runs: an announcement from `ready`, or
+    /// the core of a bridge `ready` refused as incompatible, which this updates all the same, the
+    /// link dropped since or not. The link keeps the latest `Ready` it reads, so after an install
+    /// it names the new image.
     ///
-    /// `stopper`, or a phone that stops awaiting, abandons the update while the image is sent:
-    /// the bridge keeps the image it runs, and holds the partial image's session until the next
-    /// update or until the link goes, since no op ends one. From
-    /// [`BridgeUpdateProgress::Installing`] on, the bridge boots the new image and only the
-    /// update's polls confirm it, so a stop is not taken and the call runs to its outcome; a phone
-    /// that stopped awaiting has the link back once it ends.
+    /// `stopper`, or a phone that stops awaiting, stops the update while the image is sent: it
+    /// ends the partial image's session on the bridge with `Abort`, and the bridge keeps the image
+    /// it runs. From [`BridgeUpdateProgress::Installing`] on, the bridge boots the new image and
+    /// only the update's polls confirm it, so a stop is not taken and the call runs to its
+    /// outcome; a phone that stopped awaiting has the link back once it ends.
     ///
     /// A phone has no USB to fall back on, so a bridge update that fails over Bluetooth is
     /// recovered from a computer; the app says so before it starts. It can run several minutes
@@ -1255,28 +1286,49 @@ async fn hear(
     };
     inner.give_back(handle);
     // Nobody reads the result of a listen the phone stopped awaiting.
-    let Some((heard, board)) = heard else { return Err(UpdateError::Closed) };
-    match heard {
-        Ok(heard) => Ok(Arc::new(NodesHeard { heard, board })),
-        Err(LinkClosed) => Err(UpdateError::Closed),
+    let Some(heard) = heard else { return Err(UpdateError::Closed) };
+    match heard? {
+        (Ok(heard), board) => Ok(Arc::new(NodesHeard { heard, board })),
+        (Err(LinkClosed), _) => Err(UpdateError::Closed),
+    }
+}
+
+/// Wait up to `within` for the bridge's `Ready` when `link` holds no announcement, and refuse a
+/// bridge this library reads only for its frozen core: one whose `Ready` that wait reads, one the
+/// handle read before, or one its transport has heard already.
+async fn ready_or_refused(
+    link: &mut LinkHandle,
+    over: Over,
+    within: Duration,
+) -> Result<(), UpdateError> {
+    if link.announced().is_none() {
+        let waited = ops::ready(link, over, within, ops::REPLY_TIMEOUT, &mut |_| {}).await;
+        if let Err(NotReady::Incompatible(core)) = waited.ready {
+            return Err(UpdateError::incompatible(core));
+        }
+    }
+    match link.heard_incompatible().copied().or_else(|| link.incompatible()) {
+        Some(core) => Err(UpdateError::incompatible(core)),
+        None => Ok(()),
     }
 }
 
 /// The nodes `link` hears for `period`, and the board announced when the listen starts, which
 /// labels their slots.
+///
+/// # Errors
+/// [`UpdateError::Incompatible`] for a bridge this library reads only for its frozen core.
 async fn listened(
     link: &mut LinkHandle,
     over: Over,
     period: Duration,
-) -> (Result<Heard, LinkClosed>, NodeBoard) {
-    if link.announced().is_none() {
-        // The slots are labeled on the board an announcement names, so one not yet held is
-        // waited for first, up to the listen's own length.
-        ops::ready(link, over, period, ops::REPLY_TIMEOUT, &mut |_| {}).await;
-    }
+) -> Result<(Result<Heard, LinkClosed>, NodeBoard), UpdateError> {
+    // The slots are labeled on the board an announcement names, so one not yet held is waited
+    // for first, up to the listen's own length.
+    ready_or_refused(link, over, period).await?;
     // Labeled as a capture's view labels them: no carrier before an announcement.
     let board = link.announced().map_or(NodeBoard::NoCarrier, |bridge| bridge.node_board);
-    (nodes::listen(link, period).await, board)
+    Ok((nodes::listen(link, period).await, board))
 }
 
 /// [`Link::update_nodes`]'s work, on the library's runtime. `dropped` resolves once the phone
@@ -1289,15 +1341,44 @@ async fn update_nodes(
     dropped: oneshot::Receiver<()>,
 ) -> Result<NodesUpdated, UpdateError> {
     let mut handle = lend(&inner).await?;
+    let over = if inner.is_simulated() { Over::Usb } else { Over::Bluetooth };
     let say = |progress: nodes::Progress| {
         if let Some(listener) = &listener {
             // A listener that fails is the phone's to notice; the update goes on.
             let _ = listener.progress(progress.into());
         }
     };
-    let ended = nodes::run(&mut handle, &plan.plan, halted(stopper, dropped), say).await;
+    let ended = run_nodes(&mut handle, over, &plan.plan, halted(stopper, dropped), say).await;
     inner.give_back(handle);
-    Ok(ended.into())
+    ended.map(NodesUpdated::from)
+}
+
+/// Run `plan` over `link` until `stop`, once the bridge is known to be one this library reads
+/// past its frozen core: a link that holds no announcement waits up to `ops::REPLY_TIMEOUT` for
+/// its `Ready` first, and a stop meanwhile ends the run before it starts.
+///
+/// # Errors
+/// [`UpdateError::Incompatible`] for a bridge this library reads only for its frozen core.
+async fn run_nodes(
+    link: &mut LinkHandle,
+    over: Over,
+    plan: &nodes::Plan,
+    stop: impl Future<Output = ()>,
+    say: impl FnMut(nodes::Progress),
+) -> Result<Ended, UpdateError> {
+    tokio::pin!(stop);
+    tokio::select! {
+        biased;
+        () = &mut stop => {
+            return Ok(Ended { outcomes: Vec::new(), cut_short: Some(AppCutShort::BeforeStart) });
+        }
+        ready = ready_or_refused(link, over, ops::REPLY_TIMEOUT) => ready?,
+    }
+    let ended = nodes::run(link, plan, stop, say).await;
+    match ended.cut_short {
+        Some(AppCutShort::Incompatible(core)) => Err(UpdateError::incompatible(core)),
+        _ => Ok(ended),
+    }
 }
 
 /// [`Link::update_bridge`]'s work, on the library's runtime. `dropped` resolves once the phone
@@ -1311,54 +1392,39 @@ async fn update_bridge(
 ) -> Result<BridgeUpdated, BridgeUpdateFailed> {
     let mut handle = lend(&inner).await.map_err(|error| match error {
         UpdateError::InUse => BridgeUpdateFailed::InUse,
-        UpdateError::Closed => BridgeUpdateFailed::Closed,
         UpdateError::NotPinned => BridgeUpdateFailed::NotPinned,
+        // `lend` refuses no bridge for what it runs.
+        UpdateError::Closed | UpdateError::Incompatible { .. } => BridgeUpdateFailed::Closed,
     })?;
-    let Some(running) = handle.announced().map(|bridge| bridge.image) else {
+    let Some(running) = running_image(&handle) else {
         inner.give_back(handle);
         return Err(BridgeUpdateFailed::NotAnnounced);
     };
     // The simulator stands in for a bridge on USB, as a capture over it does.
     let over = if inner.is_simulated() { Over::Usb } else { Over::Bluetooth };
-    let installing = AtomicBool::new(false);
-    let flag = &installing;
     let mut last = None;
     let say = move |progress: bridge::Progress| {
         if !passed_on(&mut last, &progress) {
             return;
-        }
-        if progress == bridge::Progress::Installing {
-            flag.store(true, Ordering::Relaxed);
         }
         if let Some(listener) = &listener {
             // A listener that fails is the phone's to notice; the update goes on.
             let _ = listener.progress(progress.into());
         }
     };
-    let updating = bridge::update(&mut handle, over, running, &image.image, say);
-    let updated = unless_stopped(updating, halted(stopper, dropped), &installing).await;
+    let stop = halted(stopper, dropped);
+    let updated = bridge::update(&mut handle, over, running, &image.image, stop, say).await;
     inner.give_back(handle);
-    match updated {
-        Some(updated) => updated.map(BridgeUpdated::from).map_err(BridgeUpdateFailed::from),
-        None => Err(BridgeUpdateFailed::Stopped),
-    }
+    updated.map(BridgeUpdated::from).map_err(BridgeUpdateFailed::from)
 }
 
-/// `update`'s outcome, or `None` when `stop` resolves while `installing` is clear, which drops
-/// the update. `bridge::update` says `Installing` in the poll that queues `Install`, so the flag
-/// is exact: once it is set the bridge boots the new image, which only the update's polls
-/// confirm, and the update runs to its outcome whatever `stop` does.
-async fn unless_stopped<T>(
-    update: impl Future<Output = T>,
-    stop: impl Future<Output = ()>,
-    installing: &AtomicBool,
-) -> Option<T> {
-    tokio::pin!(update);
-    tokio::select! {
-        updated = &mut update => return Some(updated),
-        () = stop => {}
-    }
-    if installing.load(Ordering::Relaxed) { Some(update.await) } else { None }
+/// The image the bridge on `link` runs, as its last `Ready` named it: its announcement, else the
+/// core of the bridge reached now, else that of the incompatible bridge the link heard before it
+/// dropped. A bridge this library reads only for its core announced nothing, and its core names
+/// the image all the same. `None` when the link has heard no `Ready` at all.
+fn running_image(link: &LinkHandle) -> Option<Option<[u8; DIGEST_LEN]>> {
+    let reached = link.reached().or(link.heard_incompatible()).map(|core| core.image);
+    link.announced().map(|bridge| bridge.image).or(reached)
 }
 
 /// Whether `progress` goes on to the phone's listener: a `Sending` only when its percent differs
@@ -1373,44 +1439,79 @@ fn passed_on(last: &mut Option<u8>, progress: &bridge::Progress) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+    use std::collections::HashMap;
 
-    use tokio::sync::oneshot;
     use wartui_app::update::bridge::Progress;
+    use wartui_bridge::{BridgeCore, LinkEvent, LinkPlumbing, link_pair};
+    use wartui_proto::link::Trial;
 
-    use super::{passed_on, unless_stopped};
+    use super::*;
 
-    #[tokio::test]
-    async fn unless_stopped_runs_to_the_outcome_when_stopped_after_installing() {
-        let installing = AtomicBool::new(false);
-        let (said, heard) = oneshot::channel();
-        let update = async {
-            // As `say(Installing)` does, in the poll that queues `Install`.
-            installing.store(true, Ordering::Relaxed);
-            let _ = said.send(());
-            // The reboot and the polls that confirm it.
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            "installed"
-        };
-        let stop = async {
-            let _ = heard.await;
-        };
-        assert_eq!(unless_stopped(update, stop, &installing).await, Some("installed"));
+    /// The core of a bridge one major past this library's.
+    fn other_major() -> BridgeCore {
+        let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        BridgeCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+            image: None,
+            version,
+            trial: Trial::Settled,
+            uptime_ms: 400,
+            standing: Standing::of(version, BRIDGE_VERSION, false),
+        }
+    }
+
+    /// The transport hearing its first `Ready`, unread, a moment into the call.
+    async fn answer_unread(plumbing: LinkPlumbing) -> LinkPlumbing {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        plumbing.compatibility.heard(&other_major());
+        let unread = LinkEvent::Incompatible { core: other_major(), fresh: true };
+        plumbing.events.send(unread).await.expect("the link reads");
+        plumbing
+    }
+
+    fn refused(core: BridgeCore) -> UpdateError {
+        UpdateError::incompatible(core)
     }
 
     #[tokio::test]
-    async fn unless_stopped_drops_the_update_when_stopped_while_sending() {
-        let installing = AtomicBool::new(false);
-        let (said, heard) = oneshot::channel();
-        let update = async {
-            let _ = said.send(());
-            std::future::pending::<&str>().await
-        };
-        let stop = async {
-            let _ = heard.await;
-        };
-        assert_eq!(unless_stopped(update, stop, &installing).await, None);
+    async fn update_bridge_reads_running_image_when_link_dropped_after_incompatible_ready() {
+        // The drop clears what the link reaches, and the bridge is still the one it heard.
+        let image = [0x11; DIGEST_LEN];
+        let (mut link, plumbing) = link_pair();
+        assert_eq!(running_image(&link), None, "no `Ready` yet");
+        let core = BridgeCore { image: Some(image), ..other_major() };
+        plumbing.events.send(LinkEvent::Incompatible { core, fresh: true }).await.unwrap();
+        let reason = "the bridge disconnected".to_owned();
+        let down = LinkEvent::Disconnected { reason, cause: wartui_bridge::DisconnectCause::Other };
+        plumbing.events.send(down).await.unwrap();
+        link.recv().await.expect("the unread `Ready`");
+        link.recv().await.expect("the drop");
+        assert_eq!(link.reached(), None);
+        assert_eq!(running_image(&link), Some(Some(image)), "named by the core heard before");
+    }
+
+    #[tokio::test]
+    async fn hear_nodes_refuses_when_first_ready_is_unread() {
+        // No `ready` came first, so nothing was known of the bridge when the listen began.
+        let (mut link, plumbing) = link_pair();
+        let start = tokio::time::Instant::now();
+        let period = Duration::from_secs(6);
+        let (heard, _plumbing) =
+            tokio::join!(listened(&mut link, Over::Bluetooth, period), answer_unread(plumbing));
+        let Err(error) = heard else { panic!("listened over an incompatible bridge") };
+        assert_eq!(error.to_string(), refused(other_major()).to_string());
+        assert!(matches!(error, UpdateError::Incompatible { .. }));
+        assert!(start.elapsed() < period, "refused at the answer, not after the listen");
+    }
+
+    #[tokio::test]
+    async fn update_nodes_refuses_when_first_ready_is_unread() {
+        let (mut link, plumbing) = link_pair();
+        let plan = nodes::Plan::of(Vec::new(), HashMap::new(), false);
+        let run = run_nodes(&mut link, Over::Bluetooth, &plan, std::future::pending(), |_| {});
+        let (ended, mut plumbing) = tokio::join!(run, answer_unread(plumbing));
+        assert!(matches!(ended, Err(UpdateError::Incompatible { .. })), "{ended:?}");
+        assert!(plumbing.commands.try_recv().is_none(), "nothing was sent");
     }
 
     #[test]

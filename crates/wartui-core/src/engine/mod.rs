@@ -35,6 +35,14 @@
 //! the run waits for a fix ([`FleetEngine::gps_sky`]), so the log can say why a fix is slow. The
 //! host keeps both settings and writes them with every status poll.
 //!
+//! **An incompatible bridge is reached, and not served.** A `Ready` whose rest this host did not
+//! read ([`LinkEvent::Incompatible`]) shares only the frozen core: the link is down for a capture,
+//! the previous life's [`BridgeInfo`] goes, and the engine sends, polls and records nothing until
+//! a `Connected` restores normal service. The scan mode and the GPS receiver's settings it holds
+//! are asked again then; any other command issued meanwhile is dropped, since a command only asks
+//! and the engine holds no record of it. It keeps the bridge's core for the view to name the fault
+//! ([`Snapshot::incompatible`]).
+//!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those
 //! stamps are stored nowhere else, so without the log a lag spike cannot be explained. It also
@@ -51,7 +59,7 @@ mod snapshot;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
-use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent};
+use wartui_bridge::{BridgeCore, BridgeInfo, DisconnectCause, LinkEvent};
 use wartui_proto::bus::{NodeBoard, Slot, SlotLabel};
 use wartui_proto::fleet::{Report, ScanMode, Share};
 use wartui_proto::link::{
@@ -94,6 +102,9 @@ pub struct FleetEngine {
     /// ([`NO_GPS_RECEIVER`], or [`GPS_BUS_REFUSED`]). Cleared when it says the receiver answered
     /// ([`GPS_RECEIVER_ANSWERED`]), and on every connect and disconnect.
     bridge_lacks_gps: bool,
+    /// The core of the bridge reached, while its last `Ready` went unread: another major, or a
+    /// rest that did not decode. Cleared on a `Connected` or a `Disconnected`.
+    incompatible: Option<BridgeCore>,
     link_up: bool,
     /// When the link last came up, `None` while down ([`Self::note_departures`]).
     link_up_since: Option<Instant>,
@@ -201,6 +212,7 @@ impl FleetEngine {
             slots: HashMap::new(),
             bridge: None,
             bridge_lacks_gps: false,
+            incompatible: None,
             link_up: false,
             link_up_since: None,
             link_error: None,
@@ -257,6 +269,7 @@ impl FleetEngine {
                     node_board: info.node_board,
                 }));
                 self.bridge = Some(info);
+                self.incompatible = None;
                 // A new life. The P4 repeats its GPS fault right after `Ready`.
                 self.bridge_lacks_gps = false;
                 self.link_up = true;
@@ -277,6 +290,7 @@ impl FleetEngine {
                 self.poll_bridge(now, &mut batch);
             }
             Event::Link(LinkEvent::Disconnected { reason, cause }) => {
+                self.incompatible = None;
                 self.link_up = false;
                 self.bridge_lacks_gps = false;
                 self.link_up_since = None;
@@ -285,8 +299,41 @@ impl FleetEngine {
                 self.forget_bus();
                 self.reset_arrivals();
             }
+            // Reached, and not usable for a capture: no `BridgeInfo`, and the link stays down for
+            // everything that gates on it.
+            Event::Link(LinkEvent::Incompatible { core, .. }) => {
+                if self.incompatible.is_none() {
+                    tracing::warn!(
+                        mac = %mac::full(&core.mac),
+                        version = %core.version,
+                        standing = ?core.standing,
+                        "the bridge shares only the frozen core with this host"
+                    );
+                }
+                self.incompatible = Some(core);
+                self.bridge = None;
+                self.bridge_lacks_gps = false;
+                self.link_up = false;
+                self.link_up_since = None;
+                self.link_error = None;
+                self.link_cause = None;
+                self.forget_bus();
+                self.reset_arrivals();
+            }
             Event::Link(LinkEvent::Garbled(_)) => self.counters.garbled += 1,
+            // The same life answering an `Identify` again: nothing the engine follows changed.
+            Event::Link(LinkEvent::Again(_)) => {}
             Event::Link(LinkEvent::Message(msg)) => self.on_message(&msg, now, &mut batch),
+        }
+        // Toward a bridge this host cannot read, nothing goes out. The wants the engine holds
+        // survive and are asked again once a `Connected` restores the link: the scan mode, through
+        // the `Status` its poll brings, and the GPS receiver's rate and sky, written with that
+        // poll. Every other command only asks, and the engine believes what the next `Status`
+        // reports, so one issued now is dropped.
+        if self.incompatible.is_some() {
+            for cmd in batch.urgent.drain(..).chain(batch.bulk.drain(..)) {
+                tracing::debug!(?cmd, "dropped a command toward a bridge this host cannot read");
+            }
         }
         batch
     }
