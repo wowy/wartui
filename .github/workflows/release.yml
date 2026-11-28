@@ -5,9 +5,9 @@ name: Release
 # their images from the release named by the tag baked into it (`WARTUI_RELEASE_TAG`), so the host,
 # the fleet and the bridge it flashes always share a tree. The asset names below must match the
 # app-only images' in `crates/wartui-app/src/update/release.rs` (`NODE_APP_ASSET`,
-# `BRIDGE_APP_ASSET`) and the merged node image's in `crates/wartui/src/flash/mod.rs` (`NODE`). The P4 bridge's merged image
-# and the P4 loader's (`wartui-p4-c6-loader-esp32p4.bin`) serve `flash-bridge`'s setup of a new
-# board (`crates/wartui/src/flash/setup.rs`).
+# `BRIDGE_APP_ASSET`) and the merged node image's in `crates/wartui/src/flash/mod.rs` (`NODE`).
+# The P4 bridge's merged image and the P4 loader's (`wartui-p4-c6-loader-esp32p4.bin`) serve
+# `flash-bridge`'s setup of a new board (`crates/wartui/src/flash/setup.rs`).
 # `SHA256SUMS` is what the host checks a download against. A node's image is merged (bootloader,
 # partition table and app, flashed at 0x0) with `firmware/node/partitions.csv`, and is also
 # published app-only (`wartui-node-app-esp32c5.bin`): the image one app slot holds. The P4 bridge
@@ -95,8 +95,9 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
+      # CI's `espflash@4.6.0`, so a release saves its images as CI does.
       - name: Install espflash
-        run: cargo install espflash --locked
+        run: cargo install espflash --version 4.6.0 --locked
 
       # The firmware job's check, for the crates the P4 links: it has no radio and no allocator.
       - name: One copy of each pinned crate
@@ -153,21 +154,24 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
+      # CI's `espflash@4.6.0`, so a release saves its images as CI does.
       - name: Install espflash
-        run: cargo install espflash --locked
+        run: cargo install espflash --version 4.6.0 --locked
 
       # The ESP-IDF container has no Rust, so the C6 loader is built here first and `build.sh p4`
       # embeds its saved image.
       - name: Build the C6 loader
         run: firmware/p4-c6-loader/build.sh c6
 
+      # The container's idf-component-manager loops on "Missing kconfig option" for ESP-Hosted's
+      # `ESP_HOSTED_HOST_USB_*_MANIFEST` options, where 2.5.2 builds the same tree cleanly.
       - name: Build the P4 loader
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5.4
           target: esp32p4
           path: firmware/p4-c6-loader
-          command: ./build.sh p4
+          command: python -m pip install -q "idf-component-manager==2.5.2" && ./build.sh p4
 
       - uses: actions/upload-artifact@v7
         with:

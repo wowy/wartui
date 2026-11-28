@@ -4,8 +4,8 @@ name: Firmware - P4 bridge
 # changes — its own sources, `firmware/p4-radio` (the C6 image its build script
 # builds and embeds), `firmware/common` and `crates/wartui-proto` (the path
 # dependencies both compile), `firmware/radio-image` (the crate that builds that
-# image), `rustfmt.toml` (fmt resolves it from the repo root), or this file. One workflow per firmware because GitHub's path filter is
-# workflow-wide, never per-job.
+# image), `rustfmt.toml` (fmt resolves it from the repo root), or this file. One
+# workflow per firmware because GitHub's path filter is workflow-wide, never per-job.
 
 on:
   push:

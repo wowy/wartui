@@ -65,10 +65,12 @@ jobs:
       - name: Build the C6 loader
         run: firmware/p4-c6-loader/build.sh c6
 
+      # The container's idf-component-manager loops on "Missing kconfig option" for ESP-Hosted's
+      # `ESP_HOSTED_HOST_USB_*_MANIFEST` options, where 2.5.2 builds the same tree cleanly.
       - name: Build the P4 loader
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5.4
           target: esp32p4
           path: firmware/p4-c6-loader
-          command: ./build.sh p4
+          command: python -m pip install -q "idf-component-manager==2.5.2" && ./build.sh p4
