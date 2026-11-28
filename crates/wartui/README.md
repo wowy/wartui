@@ -632,10 +632,12 @@ A failed setup leaves what it reached, and saves nothing:
   `flash-bridge` again retries. When the C6 loader itself refused or failed, a rerun does not
   fix it. When the watch timed out, the C6 loader may still be writing: wait a minute first.
 - **The C6 never answers.** The P4 runs the bridge firmware and the C6 holds what the loader left.
-  The P4 then answers with its own address, so running `flash-bridge` again takes the ordinary
-  update and does not retry the setup. To retry it, blank the P4 with
+  The error says the bridge is not remembered. The P4 then answers with its own address, so
+  running `flash-bridge` again takes the ordinary update and does not retry the setup. To retry
+  it, blank the P4 with
   `espflash erase-region --chip esp32p4 --port <P4 port> --non-interactive 0x0 0x10000`, then run
-  `flash-bridge --bridge PATH --first-flash`. The error says the bridge is not remembered.
+  `flash-bridge --first-flash`, which offers the one silent P4 and remembers it. With several P4s
+  attached, add `--bridge PATH`; a board named that way is not remembered.
 
 The C6's header is the fallback, per `firmware/p4-bridge/README.md` § "First flash". The bench
 record is [`docs/c6-first-flash-findings.md`](../../docs/c6-first-flash-findings.md).

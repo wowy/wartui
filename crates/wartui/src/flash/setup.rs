@@ -620,8 +620,9 @@ fn c6_silent_text(path: &str) -> String {
         "{path} runs the bridge firmware, but its C6 is not answering, so the bridge is not \
          remembered. Running flash-bridge again updates the P4 and does not retry the setup. To \
          retry it, blank the P4 with `espflash erase-region --chip esp32p4 --port {path} \
-         --non-interactive 0x0 0x10000`, then run flash-bridge --bridge {path} --first-flash. The C6's header is the \
-         fallback, per {}",
+         --non-interactive 0x0 0x10000`, then run flash-bridge --first-flash. With several P4s \
+         attached, add --bridge {path}; a board named that way is not remembered. The C6's \
+         header is the fallback, per {}",
         p4::FIRST_FLASH
     )
 }
@@ -899,10 +900,21 @@ mod tests {
         assert!(text.contains("not remembered") && text.contains(p4::FIRST_FLASH), "{text}");
         assert!(text.contains("does not retry the setup"), "{text}");
         assert!(
-            text.contains("espflash erase-region --chip esp32p4 --port /dev/ttyACM0 --non-interactive 0x0 0x10000"),
+            text.contains(
+                "espflash erase-region --chip esp32p4 --port /dev/ttyACM0 \
+                 --non-interactive 0x0 0x10000"
+            ),
             "{text}"
         );
-        assert!(text.contains("--bridge /dev/ttyACM0 --first-flash"), "{text}");
+        // Without --bridge, the one silent P4 is offered and remembered once it comes up.
+        assert!(text.contains("then run flash-bridge --first-flash."), "{text}");
+        assert!(
+            text.contains(
+                "With several P4s attached, add --bridge /dev/ttyACM0; a board named that way is \
+                 not remembered"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
