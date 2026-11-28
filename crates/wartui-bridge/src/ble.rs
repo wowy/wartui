@@ -81,9 +81,10 @@
 //! transport is done with a group's commands once its request is answered or a write fails
 //! (`crate` docs), which is what paces an update's sender to the link (`crate::pace`).
 //!
-//! **Commands wait for the connection's `Ready`.** The commands queue is read only while the
-//! stream is announced, and what it holds is dropped as the transport reports that `Ready` as
-//! `Connected`, as the gate drops what decodes ahead of it. A command queued while the link was
+//! **Commands wait for the connection's `Ready`.** The commands queue is read only once a
+//! `Ready` of either kind has started the stream, and what it holds is dropped as the transport
+//! reports a new life's `Ready` as `Connected` or `Incompatible`, as the gate drops what decodes
+//! ahead of it. Toward an incompatible bridge the handle queues only the frozen messages. A command queued while the link was
 //! down, a USB host held the bridge or the bridge had not yet answered is stale by then: written
 //! at the next connection, an update's re-sends from a gap arrive as a backlog. Every Bluetooth
 //! caller waits for `Connected` before its first command. USB writes what was queued, since
@@ -187,7 +188,7 @@ use crate::remember::BridgeMemory;
 use crate::spec::BridgeSpec;
 use crate::wire::encode_for_wire;
 use crate::{
-    CommandRx, DisconnectCause, LinkEvent, LinkHandle, LinkPlumbing, TransportError,
+    BridgeCore, CommandRx, DisconnectCause, LinkEvent, LinkHandle, LinkPlumbing, TransportError,
     link_pair_awaited,
 };
 
@@ -650,10 +651,11 @@ impl Inbound {
         Self { acc: FrameAccumulator::new(), gate: Gate::new(), spec, proved: false }
     }
 
-    /// Whether the stream has started: a `Ready` since the subscription or the last takeover.
+    /// Whether the stream has started: a `Ready` of either kind since the subscription or the
+    /// last takeover. The bridge has answered, whether or not this host reads its rest.
     #[must_use]
     pub fn announced(&self) -> bool {
-        self.gate.announced()
+        self.gate.started()
     }
 
     /// Take one notification's bytes, arriving at `now`.
@@ -689,10 +691,21 @@ impl Inbound {
                         };
                         heard.push(Heard::Event(event));
                     }
-                    // A bridge whose messages this host cannot read: reported as a frame it
-                    // cannot read.
-                    Admitted::Unread { .. } => {
-                        heard.push(Heard::Event(LinkEvent::Garbled(LinkError::Malformed)));
+                    // A bridge whose rest this host cannot read. The address is in the frozen
+                    // core, so it is checked and proves the bridge as any `Ready` does.
+                    Admitted::Unread { core, fresh } => {
+                        if let Some(spec) = &self.spec
+                            && !spec.matches_address(&core.mac)
+                        {
+                            heard.push(Heard::WrongBridge(core.mac));
+                            return heard;
+                        }
+                        if !self.proved {
+                            self.proved = true;
+                            heard.push(Heard::Proved(core.mac));
+                        }
+                        let core = BridgeCore::unread(&core);
+                        heard.push(Heard::Event(LinkEvent::Incompatible { core, fresh }));
                     }
                     Admitted::Message(msg) => heard.push(Heard::Event(LinkEvent::Message(msg))),
                     Admitted::Stale => {}
@@ -1371,7 +1384,11 @@ async fn pump(
                             ));
                         }
                         Heard::Event(event) => {
-                            if matches!(event, LinkEvent::Connected(_)) {
+                            let ready = event.ready();
+                            if let Some((core, _)) = &ready {
+                                plumbing.compatibility.heard(core);
+                            }
+                            if ready.is_some_and(|(_, fresh)| fresh) {
                                 // Queued before this `Ready`, so stale (§ "Commands wait").
                                 let dropped = plumbing.commands.discard();
                                 if dropped > 0 {

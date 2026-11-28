@@ -18,13 +18,18 @@
 //! it still had announced, so a phone can go on to update or start another capture over the one
 //! connection: the transport announces a bridge once per life, so the next capture is handed the
 //! announcement rather than waiting for one. A start that is refused gives the link back too.
+//!
+//! **A link heard as incompatible is refused before the store exists.** A bridge whose last `Ready`
+//! this host read only for its frozen core takes no capture, so a front end that waited on it is
+//! told why ([`Refusal::Incompatible`]) with no capture file left behind. A link not yet read, as
+//! `run` hands one, has heard nothing: there the capture starts, and its engine shows the fault.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinHandle};
-use wartui_bridge::{BridgeInfo, LinkHandle};
+use wartui_bridge::{BridgeCore, BridgeInfo, LinkHandle};
 use wartui_core::engine::{Command, EngineConfig, FleetEngine, Snapshot, StoreStats};
 use wartui_core::health::HealthReader;
 use wartui_core::position::PositionChain;
@@ -100,10 +105,20 @@ pub struct SessionEnd {
 /// A capture that did not start, and the link it would have run over, still open.
 #[derive(Debug)]
 pub struct Refused {
-    /// Why the store could not be created.
-    pub error: StoreError,
+    /// Why it did not start.
+    pub reason: Refusal,
     /// Boxed, since the handle is large and an error travels by value.
     pub link: Box<LinkHandle>,
+}
+
+/// Why a capture did not start.
+#[derive(Debug)]
+pub enum Refusal {
+    /// The store could not be created.
+    Store(StoreError),
+    /// The link's last `Ready` was a bridge's this host reads only for its frozen core: another
+    /// major, or another build of this one. No store was created.
+    Incompatible(BridgeCore),
 }
 
 /// A session's task panicked, so its capture may not have closed out.
@@ -124,8 +139,9 @@ impl Session {
     /// `health` is read once per host sample for the host's own health; `None` records nothing.
     ///
     /// # Errors
-    /// [`Refused`], with the store's error and the link, when the store cannot be created. A
-    /// capture that exists already is refused.
+    /// [`Refused`], with the link, when the link was heard as incompatible
+    /// ([`Refusal::Incompatible`]) or the store cannot be created ([`Refusal::Store`]). A capture
+    /// that exists already is refused.
     pub fn start(
         config: SessionConfig,
         link: LinkHandle,
@@ -133,6 +149,11 @@ impl Session {
         health: Option<HealthReader>,
         settings: Settings,
     ) -> Result<Self, Refused> {
+        if announced.is_none()
+            && let Some(core) = link.reached().filter(|core| !core.compatible()).copied()
+        {
+            return Err(Refused { reason: Refusal::Incompatible(core), link: Box::new(link) });
+        }
         let started = now();
         let info =
             CaptureInfo { notes: config.notes, simulated: config.test_data, link: config.link };
@@ -163,7 +184,9 @@ impl Session {
         };
         let store = match store {
             Ok(store) => store,
-            Err(error) => return Err(Refused { error, link: Box::new(link) }),
+            Err(error) => {
+                return Err(Refused { reason: Refusal::Store(error), link: Box::new(link) });
+            }
         };
 
         if let Some(bridge) = &announced {

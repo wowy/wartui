@@ -5,9 +5,10 @@
 //!
 //! **Plain data.** A `Snapshot` cannot cross a phone binding: it carries instants, byte arrays,
 //! bit sets and protocol newtypes. Every field here is a `bool`, an integer, an `f64`, a `String`,
-//! an `Option` or `Vec` of these, a type of this module, or one of ten plain enums:
+//! an `Option` or `Vec` of these, a type of this module, one of twelve plain enums:
 //! [`ChannelPool`], [`ResetCause`], [`Board`], [`PositionSource`], [`Constellation`], [`Planner`],
-//! [`SdState`], [`SdLogState`], [`PowerOutcome`] and [`SdFormatOutcome`].
+//! [`SdState`], [`SdLogState`], [`PowerOutcome`], [`SdFormatOutcome`], [`Standing`] and [`End`],
+//! or a firmware [`Version`], three `u8`s.
 //! Milliseconds are `i64`, the engine's `u64` totals stay `u64`, and counts of nodes are `u32`.
 //!
 //! **Data, never sentences.** A `String` here holds a datum: an address, a slot's label, a port, a
@@ -29,9 +30,11 @@ use wartui_core::nmea::Constellation;
 use wartui_core::position::PositionSource;
 #[cfg(doc)]
 use wartui_proto::bus::Board;
+#[cfg(doc)]
+use wartui_proto::bus::Version;
 use wartui_proto::fleet::ScanMode;
 #[cfg(doc)]
-use wartui_proto::link::{PowerOutcome, SdFormatOutcome, SdLogState, SdState};
+use wartui_proto::link::{End, PowerOutcome, SdFormatOutcome, SdLogState, SdState, Standing};
 use wartui_proto::mac;
 #[cfg(doc)]
 use wartui_proto::plan::Planner;

@@ -304,6 +304,33 @@ async fn serial_link_sends_get_status_when_proven_connection_is_quiet() {
 }
 
 #[tokio::test]
+async fn serial_keepalive_sends_identify_when_bridge_is_incompatible() {
+    // The P4 closes its USB gate 15 s after the last frame it decodes, and a bridge on another
+    // major cannot decode this host's `GetStatus`.
+    let fake = FakePorts::default();
+    fake.attach(ch343(ACM0, SERIAL_A), Behavior::OtherMajor { mac: bridge_mac(1) });
+    let quick = Cadence { keepalive: TICK * 3, ..cadence() };
+    let mut handle = SerialTransport::new(fake.ports()).cadence(quick).start().unwrap();
+    let wait = async {
+        loop {
+            match handle.recv().await {
+                Some(LinkEvent::Incompatible { core, .. }) => return core,
+                Some(_) => {}
+                None => panic!("the link ended"),
+            }
+        }
+    };
+    let core = tokio::time::timeout(WITHIN, wait).await.expect("answered in time");
+    assert_eq!(core.mac, bridge_mac(1));
+
+    // The asks stop at the answer, so what follows is the keepalive.
+    let asked = identifies(&fake, ACM0);
+    until(|| identifies(&fake, ACM0) >= asked + 2).await;
+    assert!(!fake.decoded(ACM0).contains(&HostToBridge::GetStatus), "{:?}", fake.decoded(ACM0));
+    assert_eq!(handle.queued(), 0, "nothing was sent on the handle");
+}
+
+#[tokio::test]
 async fn serial_link_counts_command_done_when_port_takes_it() {
     let fake = FakePorts::default();
     fake.attach(ch343(ACM0, SERIAL_A), bridge(1));

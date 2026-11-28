@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
 use tokio::sync::watch;
-use wartui_app::session::{Session, SessionConfig};
+use wartui_app::session::{Refusal, Session, SessionConfig};
 use wartui_app::settings::Settings;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_core::engine::{Command, Snapshot};
@@ -290,7 +290,11 @@ pub async fn run(args: Args) -> Result<()> {
     let health = Box::new(wartui_desktop::health::read);
     // Its settings are saved nowhere: a benchmark remembers no bridge.
     let session = Session::start(session, link, None, Some(health), Settings::default())
-        .map_err(|refused| refused.error)
+        .map_err(|refused| match refused.reason {
+            Refusal::Store(error) => anyhow::Error::new(error),
+            // The simulator's bridge is this build's.
+            Refusal::Incompatible(core) => anyhow::anyhow!("the simulator ran {}", core.version),
+        })
         .with_context(|| format!("creating {}", args.db.display()))?;
     let mut snapshot_rx = session.snapshots();
     let controls = session.controls();

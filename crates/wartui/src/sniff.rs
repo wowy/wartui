@@ -91,6 +91,15 @@ pub async fn run(args: Args) -> Result<()> {
                 }
             }
             event = link.recv() => match event {
+                // It sends nothing this build reads but its core, so there is nothing to show.
+                Some(LinkEvent::Incompatible { core, .. }) => anyhow::bail!(
+                    "{}",
+                    crate::text::incompatible_text(
+                        core.version,
+                        wartui_proto::link::BRIDGE_VERSION,
+                        core.standing
+                    )
+                ),
                 Some(event) => handle(event, &args, &mut counts),
                 None => {
                     println!("# link closed");

@@ -16,9 +16,9 @@ use wartui_bridge::{DisconnectCause, LinkEvent, TransportError};
 use wartui_proto::ble::{ATT_MTU, DOWN_VALUE_MAX};
 use wartui_proto::bus::{NodeBoard, Slot, Version};
 use wartui_proto::link::{
-    BRIDGE_VERSION, BridgeToHost, FrameAccumulator, FromNodeBody, HostToBridge, LinkError, LogStr,
-    LoopPhase, MAX_FRAME, MAX_HOST_FRAME, Ready, ReadyCore, ReadyRest, ShortStr, ToNodeBody, Trial,
-    USB_TOOK_BRIDGE, decode_host_frame, encode_frame, encode_host_frame,
+    BRIDGE_VERSION, BridgeToHost, End, FrameAccumulator, FromNodeBody, HostToBridge, LogStr,
+    LoopPhase, MAX_FRAME, MAX_HOST_FRAME, Ready, ReadyCore, ReadyRest, ShortStr, Standing,
+    ToNodeBody, Trial, USB_TOOK_BRIDGE, decode_host_frame, encode_frame, encode_host_frame,
 };
 use wartui_proto::reset::ResetCause;
 
@@ -350,16 +350,32 @@ fn ble_inbound_drops_frames_when_they_arrive_before_first_ready() {
 }
 
 #[test]
-fn ble_inbound_skips_frame_when_bridge_is_another_major() {
-    // Its `Ready` reads as a frame this host cannot read, and its other messages are not read.
+fn ble_inbound_reports_incompatible_when_ready_is_from_another_major() {
+    // Its frozen core proves the bridge, and its other messages are not read.
     let other = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
     let mut bytes = frame(&ready_on(other, BRIDGE, 500));
     bytes.extend(frame(&rx(20)));
     bytes.extend(frame(&takeover()));
     let mut inbound = Inbound::new(None);
     let heard = inbound.feed(&bytes, Instant::now());
-    assert_eq!(heard, [Heard::Event(LinkEvent::Garbled(LinkError::Malformed))]);
-    assert!(!inbound.announced(), "still asking");
+    assert_eq!(heard[0], Heard::Proved(BRIDGE), "remembered as a readable bridge is");
+    let events = events(heard);
+    let [LinkEvent::Incompatible { core, fresh: true }] = &events[..] else {
+        panic!("not reported incompatible: {events:?}")
+    };
+    assert_eq!((core.mac, core.version), (BRIDGE, other));
+    assert_eq!(core.standing, Standing::Apart { older: End::Host });
+    assert!(inbound.announced(), "it answered, so the stream has started");
+}
+
+#[test]
+fn ble_inbound_reports_wrong_bridge_when_unread_ready_names_another_address() {
+    // The address is in the frozen core, so the spec is checked as for a readable `Ready`.
+    let other = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+    let elsewhere = [0x02, 0xF2, 0x62, 0x10, 0x44, 0xC0];
+    let mut inbound = Inbound::new(Some(spec("02:00:5E:10:44:C0")));
+    let heard = inbound.feed(&frame(&ready_on(other, elsewhere, 500)), Instant::now());
+    assert_eq!(heard, [Heard::WrongBridge(elsewhere)]);
 }
 
 #[test]

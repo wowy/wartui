@@ -179,6 +179,7 @@ pub(super) fn busy() -> Snapshot {
             version: wartui_proto::link::BRIDGE_VERSION,
             trial: wartui_proto::link::Trial::Settled,
         }),
+        incompatible: None,
         link_up: true,
         link_error: None,
         link_cause: None,

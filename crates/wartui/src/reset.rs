@@ -7,7 +7,7 @@
 //!
 //! Transmitting before anything has identified itself is what makes this command
 //! work and what makes it the one command that must never be pointed at a guess.
-//! `Reset` and the status polls behind it are several frames. A CH343 carries every one
+//! `Reset` and the `Identify` polls behind it are several frames. A CH343 carries every one
 //! to whatever is behind it, but a path can name a node, whose USB Serial/JTAG absorbs
 //! one: the rest sit in the tty's output queue until `close` gives up on them thirty
 //! seconds later, so `wartui reset` aimed at a node takes about that long to say it
@@ -17,7 +17,12 @@
 //!
 //! **The P4 comes back on the same port, deaf until asked.** Its CH343 stays on the bus,
 //! so the connection holds through the reboot and reads the bootloader's log as garbage.
-//! The rebooted P4 writes nothing until a host frame arrives, which the status polls are.
+//! The rebooted P4 writes nothing until a host frame arrives, which the polls are.
+//!
+//! **Every message here is in the frozen core**, so this works on any bridge that carries it,
+//! whatever build it runs: `Reset`, then `Identify` polls, each answered by a `Ready` whose core
+//! names the life. The new life is read from those `Ready`s, readable or not
+//! (`LinkEvent::ready`).
 //!
 //! Rebooting is confirmed by uptime and by uptime alone; [`rebooted`] is the rule.
 //! [`FRESH_UPTIME_MS`] covers the one case with no earlier figure to compare
@@ -27,13 +32,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use wartui_app::ops::NotReady;
 use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::{self, Probed, discover_bridges, probe_all};
 use wartui_bridge::spec::BridgeSpec;
-use wartui_bridge::{BridgeInfo, LinkEvent, TransportError};
+use wartui_bridge::{BridgeCore, BridgeInfo, LinkEvent, TransportError};
 use wartui_desktop::serial_ports;
-use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_proto::link::{BRIDGE_VERSION, HostToBridge};
 use wartui_proto::mac;
 
 use crate::config::Link;
@@ -52,15 +58,8 @@ const RECOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// uptimes and needs no threshold.
 const FRESH_UPTIME_MS: u32 = 10_000;
 
-/// How often to re-ask for a status while waiting for it to come back.
+/// How often to ask with `Identify` while waiting for the bridge to come back.
 const POLL: Duration = Duration::from_millis(500);
-
-/// How long to keep listening for the announcement after the proof arrives.
-///
-/// The uptime proves the reboot and can win the race against the `Ready` carrying
-/// the reset cause — measured at 0 ms uptime on a C6. Waiting a moment for the more
-/// interesting of the two costs nothing when it has already arrived.
-const ANNOUNCE_GRACE: Duration = Duration::from_millis(750);
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -111,8 +110,8 @@ pub async fn run(args: Args) -> Result<()> {
     println!("reset sent to {board}");
 
     match tokio::time::timeout(RECOVERY_TIMEOUT, wait_for_reboot(&mut link, None)).await {
-        Ok(Ok((info, uptime_ms))) => {
-            report(info.as_ref(), uptime_ms);
+        Ok(Ok(back)) => {
+            report(&back);
             Ok(())
         }
         Ok(Err(err)) => Err(err),
@@ -153,9 +152,13 @@ async fn over_bluetooth(named: Option<&str>, remembered: &crate::config::Bridge)
     let memory = super::unsaved_memory(remembered);
     let mut link = super::open(Some(&board), None, Link::Bluetooth, memory)?;
     let wait = super::connect_wait(Link::Bluetooth);
-    let before = match crate::status::wait_for_ready(&mut link, Link::Bluetooth, wait).await? {
-        Some(info) => info.uptime_ms,
-        None => bail!(
+    // A bridge this build reads only for its frozen core takes a `Reset` all the same.
+    let waited = crate::status::wait_for_ready_or_why(&mut link, Link::Bluetooth, wait).await;
+    let before = match waited.ready {
+        Ok(Some(info)) => info.uptime_ms,
+        Err(NotReady::Incompatible(core)) => core.uptime_ms,
+        Err(why) => bail!("{}", crate::status::not_ready_text(why)),
+        Ok(None) => bail!(
             "{}\nOver USB, `wartui reset` reaches a bridge that answers nothing.",
             super::no_bridge_notice(Some(&board), Link::Bluetooth).await
         ),
@@ -164,8 +167,8 @@ async fn over_bluetooth(named: Option<&str>, remembered: &crate::config::Bridge)
     println!("reset sent to {board} over Bluetooth");
     let recovery = BLUETOOTH_RECOVERY_TIMEOUT;
     match tokio::time::timeout(recovery, wait_for_reboot(&mut link, Some(before))).await {
-        Ok(Ok((info, uptime_ms))) => {
-            report(info.as_ref(), uptime_ms);
+        Ok(Ok(back)) => {
+            report(&back);
             Ok(())
         }
         Ok(Err(err)) => Err(err),
@@ -215,67 +218,52 @@ where
     }
 }
 
-/// Poll for a status until one comes back reporting a bridge that restarted.
+/// The life a reset brought up, as its first `Ready` after the reset says it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Back {
+    /// A bridge this build reads: its announcement, which names its reset cause.
+    Announced(BridgeInfo),
+    /// A bridge this build reads only for its frozen core, or the life's repeat on a connection
+    /// that announced it already.
+    Core(BridgeCore),
+}
+
+/// Poll with `Identify` until a `Ready` comes back from a bridge that restarted.
 ///
-/// The `Connected` from the life being *replaced* is not what is wanted and is
-/// not kept: it carries the old life's reset cause, and printing that under
-/// "back up" would answer the question this command exists to ask with the
-/// answer to the previous one.
+/// A `Ready` from the life being *replaced* is not what is wanted and is not kept: it carries the
+/// old life's reset cause, and printing that under "back up" would answer the question this
+/// command exists to ask with the answer to the previous one.
 ///
 /// `before` is the uptime of the life being replaced, when it was heard before the reset.
 async fn wait_for_reboot(
     link: &mut wartui_bridge::LinkHandle,
     before: Option<u32>,
-) -> Result<(Option<BridgeInfo>, u32)> {
-    let mut seen: Option<BridgeInfo> = None;
-    let mut proof: Option<u32> = None;
+) -> Result<Back> {
     // The highest uptime seen from the life that is being replaced.
     let mut before = before;
     let mut poll = tokio::time::interval(POLL);
-    let grace = tokio::time::sleep(Duration::MAX);
-    tokio::pin!(grace);
     loop {
         tokio::select! {
             _ = poll.tick() => {
                 // Ignored rather than propagated: until the bridge is back the
                 // link may be mid-reconnect, and a queue that is not there yet
                 // is what this loop is waiting out.
-                let _ = link.send_bulk(HostToBridge::GetStatus);
+                let _ = link.send_bulk(HostToBridge::Identify);
             }
-            // Armed once, when the reboot is proven, and never re-armed; until
-            // then it is a sleep that never finishes. Re-arming it on each
-            // status would make it unreachable, because the poll interval is
-            // shorter than the grace and a bridge answers in milliseconds.
-            () = &mut grace => return Ok((seen, proof.unwrap_or_default())),
-            event = link.recv() => match event {
-                Some(LinkEvent::Connected(info)) => {
-                    if !rebooted(info.uptime_ms, before) {
-                        before = before.max(Some(info.uptime_ms));
-                        continue;
-                    }
-                    seen = Some(info);
-                    if proof.is_some() {
-                        return Ok((seen, proof.unwrap_or_default()));
-                    }
+            event = link.recv() => {
+                let Some(event) = event else { bail!("the link closed") };
+                // A disconnect is not a failure here. The reset may have taken the port with
+                // it, and the transport reopens on its own.
+                let Some((core, _)) = event.ready() else { continue };
+                if !rebooted(core.uptime_ms, before) {
+                    before = before.max(Some(core.uptime_ms));
+                    continue;
                 }
-                Some(LinkEvent::Message(BridgeToHost::Status { uptime_ms, .. })) => {
-                    if !rebooted(uptime_ms, before) {
-                        before = before.max(Some(uptime_ms));
-                        continue;
-                    }
-                    if seen.is_some() {
-                        return Ok((seen, uptime_ms));
-                    }
-                    if proof.is_none() {
-                        grace.as_mut().reset(tokio::time::Instant::now() + ANNOUNCE_GRACE);
-                    }
-                    proof = Some(uptime_ms);
-                }
-                // A disconnect is not a failure here. The reset may have taken
-                // the port with it, and the transport reopens on its own.
-                Some(_) => {}
-                None => bail!("the link closed"),
-            },
+                return Ok(match event {
+                    LinkEvent::Connected(info) => Back::Announced(info),
+                    _ => Back::Core(core),
+                });
+            }
         }
     }
 }
@@ -293,16 +281,22 @@ fn rebooted(uptime_ms: u32, before: Option<u32>) -> bool {
     }
 }
 
-fn report(info: Option<&BridgeInfo>, uptime_ms: u32) {
-    match info {
-        Some(info) => println!("back up: {}, firmware {}", mac::full(&info.mac), info.fw_version),
-        // Reachable when the bridge was announced on a connection this command did
-        // not open: the transport reports one `Connected` per connection.
-        None => println!("back up"),
-    }
-    println!("uptime     {uptime_ms}ms, so it did reboot");
-    if let Some(info) = info {
-        println!("{}", super::last_reset_line(info));
+fn report(back: &Back) {
+    match back {
+        Back::Announced(info) => {
+            println!("back up: {}, firmware {}", mac::full(&info.mac), info.fw_version);
+            println!("uptime     {}ms, so it did reboot", info.uptime_ms);
+            println!("{}", super::last_reset_line(info));
+        }
+        Back::Core(core) => {
+            println!("back up: {}, bridge firmware {}", mac::full(&core.mac), core.version);
+            println!("uptime     {}ms, so it did reboot", core.uptime_ms);
+            if !core.compatible() {
+                let text =
+                    crate::text::incompatible_text(core.version, BRIDGE_VERSION, core.standing);
+                println!("note       {text}");
+            }
+        }
     }
 }
 
@@ -328,7 +322,14 @@ mod tests {
     use wartui_bridge::spec::BridgeSpec;
     use wartui_proto::mac;
 
-    use super::{FRESH_UPTIME_MS, bluetooth_target, board_to_reset, rebooted, unreachable_notice};
+    use wartui_bridge::{BridgeCore, LinkEvent, link_pair};
+    use wartui_proto::bus::Version;
+    use wartui_proto::link::{BRIDGE_VERSION, HostToBridge, Standing, Trial};
+
+    use super::{
+        Back, FRESH_UPTIME_MS, bluetooth_target, board_to_reset, rebooted, unreachable_notice,
+        wait_for_reboot,
+    };
     use crate::config::Bridge;
 
     const BRIDGE_MAC: &str = "02:00:5E:10:44:C0";
@@ -467,6 +468,38 @@ mod tests {
         let list = || panic!("nothing to list");
         let board = board_to_reset(Some("/dev/ttyACM9"), &Bridge::default(), list, unasked).await;
         assert_eq!(board.expect("the path as given"), "/dev/ttyACM9");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reset_reads_new_life_from_ready_when_bridge_is_incompatible() {
+        // A bridge on another major answers `Identify` alone: the old life twice, then the new.
+        let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        let core = move |uptime_ms| BridgeCore {
+            mac: mac::parse(BRIDGE_MAC).unwrap(),
+            image: None,
+            version,
+            trial: Trial::Settled,
+            uptime_ms,
+            standing: Standing::of(version, BRIDGE_VERSION, false),
+        };
+        let (mut link, mut plumbing) = link_pair();
+        plumbing.compatibility.heard(&core(600_000));
+        let bridge = tokio::spawn(async move {
+            let mut asked = Vec::new();
+            for uptime_ms in [600_000, 600_500, 40] {
+                let cmd = plumbing.commands.recv().await.expect("a poll");
+                plumbing.commands.done(1);
+                asked.push(cmd);
+                let ready =
+                    LinkEvent::Incompatible { core: core(uptime_ms), fresh: uptime_ms == 40 };
+                plumbing.events.send(ready).await.expect("the link reads");
+            }
+            asked
+        });
+        let back = wait_for_reboot(&mut link, Some(600_000)).await.expect("back up");
+        assert_eq!(back, Back::Core(core(40)));
+        let asked = bridge.await.unwrap();
+        assert!(asked.iter().all(|cmd| *cmd == HostToBridge::Identify), "{asked:?}");
     }
 
     #[test]

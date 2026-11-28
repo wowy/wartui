@@ -527,8 +527,16 @@ fn describe(event: &LinkEvent) -> Option<String> {
         } => Some(reason.clone()),
         LinkEvent::Disconnected { reason, .. } => Some(format!("link down: {reason}")),
         LinkEvent::Garbled(err) => Some(format!("undecodable frame: {err}")),
+        // Once per life: every `Identify` brings another.
+        LinkEvent::Incompatible { core, fresh: true } => Some(crate::text::incompatible_text(
+            core.version,
+            wartui_proto::link::BRIDGE_VERSION,
+            core.standing,
+        )),
         // The same life answering again: nothing new to say.
-        LinkEvent::Again(_) | LinkEvent::Message(_) => None,
+        LinkEvent::Again(_)
+        | LinkEvent::Incompatible { fresh: false, .. }
+        | LinkEvent::Message(_) => None,
     }
 }
 

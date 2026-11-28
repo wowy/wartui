@@ -75,6 +75,17 @@
 //!
 //! A failed update over Bluetooth is recovered over USB, by updating again there; nothing resumes
 //! a partly sent image.
+//!
+//! **An incompatible bridge is updated over the frozen core.** A bridge whose `Ready` this host
+//! cannot read past its core, another major or another build, takes `Identify`, `Reset` and
+//! `Update` alone (`wartui_bridge`'s send rule), and everything the update reads is in the core:
+//! the image and the trial in each `Ready`, the `Status` in each `Update`. So the update runs as it
+//! does on any bridge, reading every `Ready` through `LinkEvent::ready`, with two steps left out.
+//! The scan is not stopped first, since that needs `StopScan` and `GetStatus`: the P4 stops its own
+//! scan when it takes a central's `Begin`. And the C6's update is followed only after a readable
+//! `Ready`, since its lines are messages an incompatible bridge's host does not read. An image
+//! whose bridge comes back incompatible, another major installed, is judged from the core all the
+//! same.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -221,8 +232,9 @@ pub enum Failed {
 }
 
 /// Update the bridge on `link`, reached over `over`, to `image`. `running` is the image the
-/// bridge's `Ready` named (`BridgeInfo::image`). Opening the link and waiting for that `Ready`
-/// are the caller's. `stop` resolves when the caller wants the update stopped, which is taken
+/// bridge's `Ready` named: `BridgeInfo::image`, or `BridgeCore::image` from
+/// [`LinkHandle::reached`] for a bridge that announced nothing, which this host cannot read.
+/// Opening the link and waiting for that `Ready` are the caller's. `stop` resolves when the caller wants the update stopped, which is taken
 /// only while the image is sent (the module's `//!`). `say` is `Send`, so a phone's binding runs
 /// the update as a task of its own runtime.
 ///
@@ -242,7 +254,8 @@ pub async fn update(
         return Ok(Updated::AlreadyCurrent);
     }
     let bluetooth = over == Link::Bluetooth;
-    if bluetooth && !stop_scan(link, SCAN_STOP_WAIT).await {
+    // An incompatible bridge takes no `StopScan`, and stops its own scan at the `Begin`.
+    if bluetooth && link.incompatible().is_none() && !stop_scan(link, SCAN_STOP_WAIT).await {
         say(Progress::ScanNotStopped);
     }
 
@@ -254,9 +267,12 @@ pub async fn update(
         return Ok(Updated::Installed);
     }
     let back = update.come_back(link, say).await?;
-    update.confirm(link, back, say).await?;
+    let settled = update.confirm(link, back, say).await?;
     say(Progress::Confirmed);
-    update.follow_radio(link, say).await;
+    // The C6's lines reach only a host that reads the new image's messages.
+    if settled.compatible() {
+        update.follow_radio(link, say).await;
+    }
     Ok(Updated::Installed)
 }
 
@@ -401,14 +417,16 @@ impl<'a> Update<'a> {
                     Some(LinkEvent::Disconnected { reason, .. }) => {
                         return Err(Failed::Dropped { reason });
                     }
-                    Some(LinkEvent::Connected(info)) => {
-                        self.said.new_life();
-                        if on_ready(Phase::Sending, self.before, info.image) == OnReady::Abort {
-                            return Err(Failed::RestartedIntoOther);
+                    // A new life, readable or not. A repeat is the same life, which runs the
+                    // image it ran.
+                    Some(event) => {
+                        if let Some((core, true)) = event.ready() {
+                            self.said.new_life();
+                            if on_ready(Phase::Sending, self.before, core.image) == OnReady::Abort {
+                                return Err(Failed::RestartedIntoOther);
+                            }
                         }
                     }
-                    // The same life, which runs the image it ran.
-                    Some(LinkEvent::Again(_) | LinkEvent::Garbled(_)) => {}
                     None => return Err(Failed::Closed),
                 },
             }
@@ -436,22 +454,19 @@ impl<'a> Update<'a> {
                     () = written.changed(), if self.sender.is_waiting() => {}
                     _ = poll.tick() => identify(link),
                     event = link.recv() => match event {
-                        Some(LinkEvent::Connected(info)) => {
-                            if on_ready(Phase::Installing, self.before, info.image)
-                                == OnReady::Back
+                        Some(LinkEvent::Message(message)) => self.take(message, say),
+                        // A new life, readable or not: another major installed comes back
+                        // incompatible. A repeat is the life the install found, not yet rebooted:
+                        // `verdict`'s `NotYet`. The transport reopens the port on its own.
+                        Some(event) => {
+                            if let Some((core, true)) = event.ready()
+                                && on_ready(Phase::Installing, self.before, core.image)
+                                    == OnReady::Back
                             {
                                 self.said.new_life();
-                                return Ok(info.core());
+                                return Ok(core);
                             }
                         }
-                        Some(LinkEvent::Message(message)) => self.take(message, say),
-                        // The life the install found, not yet rebooted: `verdict`'s `NotYet`.
-                        // The transport reopens the port on its own.
-                        Some(
-                            LinkEvent::Again(_)
-                            | LinkEvent::Disconnected { .. }
-                            | LinkEvent::Garbled(_),
-                        ) => {}
                         None => return Err(Failed::Closed),
                     },
                 }
@@ -464,19 +479,20 @@ impl<'a> Update<'a> {
     }
 
     /// Over USB, from the new life's first `Ready`, `back`: read each answer to an `Identify`
-    /// every [`POLL`] until one settles the outcome, for up to [`CONFIRM_WAIT`].
+    /// every [`POLL`] until one settles the outcome, for up to [`CONFIRM_WAIT`]. Returns the core
+    /// that said the image is installed.
     async fn confirm(
         &mut self,
         link: &mut LinkHandle,
         back: BridgeCore,
         say: &mut (dyn FnMut(Progress) + Send),
-    ) -> Result<(), Failed> {
+    ) -> Result<BridgeCore, Failed> {
         let deadline = tokio::time::Instant::now() + CONFIRM_WAIT;
         let mut poll = tokio::time::interval(POLL);
         let mut reading = (back, true);
         loop {
             match verdict(&self.sent, self.before, &reading.0, reading.1) {
-                Verdict::Installed => return Ok(()),
+                Verdict::Installed => return Ok(reading.0),
                 Verdict::ConfirmFailed => return Err(Failed::NotConfirmed),
                 Verdict::RolledBack => return Err(Failed::RolledBack),
                 Verdict::Other => return Err(Failed::OtherImage),
@@ -546,22 +562,6 @@ impl<'a> Update<'a> {
                 // Only while connected, so no backlog waits out a drop.
                 _ = poll.tick(), if settling.up() => identify(link),
                 event = link.recv() => match event {
-                    Some(LinkEvent::Connected(info)) => {
-                        // Asked at once, so a trial image is confirmed and the answer says so.
-                        identify(link);
-                        self.said.new_life();
-                        let back = settling.came_back();
-                        let radio = settling.radio_updated();
-                        settling.see(Seen::Ready { core: info.core(), fresh: true }, Instant::now());
-                        if !back && settling.came_back() {
-                            deadline = tokio::time::Instant::now() + SETTLE_BLUETOOTH;
-                        } else if back && radio {
-                            say(Progress::RadioRestarted);
-                        }
-                    }
-                    Some(LinkEvent::Again(core)) => {
-                        settling.see(Seen::Ready { core, fresh: false }, Instant::now());
-                    }
                     Some(LinkEvent::Disconnected { .. }) => {
                         settling.see(Seen::Down, Instant::now());
                         if !dropped {
@@ -578,7 +578,25 @@ impl<'a> Update<'a> {
                         }
                         self.said.line(&message, say);
                     }
-                    Some(LinkEvent::Garbled(_)) => {}
+                    // A `Ready`, readable or not.
+                    Some(event) => {
+                        let Some((core, fresh)) = event.ready() else { continue };
+                        if !fresh {
+                            settling.see(Seen::Ready { core, fresh }, Instant::now());
+                            continue;
+                        }
+                        // Asked at once, so a trial image is confirmed and the answer says so.
+                        identify(link);
+                        self.said.new_life();
+                        let back = settling.came_back();
+                        let radio = settling.radio_updated();
+                        settling.see(Seen::Ready { core, fresh }, Instant::now());
+                        if !back && settling.came_back() {
+                            deadline = tokio::time::Instant::now() + SETTLE_BLUETOOTH;
+                        } else if back && radio {
+                            say(Progress::RadioRestarted);
+                        }
+                    }
                     None => return Err(Failed::Closed),
                 },
             }
@@ -876,9 +894,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use wartui_bridge::{BridgeInfo, DisconnectCause, LinkPlumbing, link_pair};
-    use wartui_proto::bus::{Board, NodeBoard};
+    use wartui_proto::bus::{Board, NodeBoard, Version};
     use wartui_proto::link::{
-        BRIDGE_VERSION, LogStr, LoopPhase, UPDATE_STATUS_MAX, UpdateStatusBytes,
+        BRIDGE_VERSION, LogStr, LoopPhase, Standing, UPDATE_STATUS_MAX, UpdateStatusBytes,
     };
     use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
     use wartui_proto::radio_link::update::{Received, receive};
@@ -894,7 +912,22 @@ mod tests {
 
     /// A `Ready`'s core naming `image` on `trial`, from a C6 up `uptime_ms`.
     fn core(image: [u8; DIGEST_LEN], trial: Trial, uptime_ms: u32) -> BridgeCore {
-        BridgeCore { mac: MAC, image: Some(image), version: BRIDGE_VERSION, trial, uptime_ms }
+        let standing = Standing::Same;
+        BridgeCore {
+            mac: MAC,
+            image: Some(image),
+            version: BRIDGE_VERSION,
+            trial,
+            uptime_ms,
+            standing,
+        }
+    }
+
+    /// The same, from a bridge one major past this host's, whose rest went unread.
+    fn other_major(image: [u8; DIGEST_LEN], trial: Trial, uptime_ms: u32) -> BridgeCore {
+        let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        let standing = Standing::of(version, BRIDGE_VERSION, false);
+        BridgeCore { version, standing, ..core(image, trial, uptime_ms) }
     }
 
     #[test]
@@ -1245,6 +1278,10 @@ mod tests {
         closes: bool,
         /// How long each command takes.
         per_command: Duration,
+        /// The life before the install runs a build this host cannot read.
+        incompatible_before: bool,
+        /// The image it boots into is one this host cannot read.
+        incompatible_after: bool,
     }
 
     impl Script {
@@ -1258,8 +1295,34 @@ mod tests {
                 old_answers: 0,
                 closes: false,
                 per_command: Duration::ZERO,
+                incompatible_before: false,
+                incompatible_after: false,
             }
         }
+
+        /// Another answer from the life before the install.
+        fn before(&self, core: BridgeCore) -> LinkEvent {
+            if self.incompatible_before {
+                LinkEvent::Incompatible { core: unread(core), fresh: false }
+            } else {
+                LinkEvent::Again(core)
+            }
+        }
+
+        /// A `Ready` from the life after the install, a new one when `fresh`.
+        fn after(&self, core: BridgeCore, fresh: bool) -> LinkEvent {
+            match (self.incompatible_after, fresh) {
+                (true, fresh) => LinkEvent::Incompatible { core: unread(core), fresh },
+                (false, true) => LinkEvent::Connected(ready(core)),
+                (false, false) => LinkEvent::Again(core),
+            }
+        }
+    }
+
+    /// `core`, as a bridge one major past this host's sends it.
+    fn unread(core: BridgeCore) -> BridgeCore {
+        let BridgeCore { version, standing, .. } = other_major(OLD, Trial::Settled, 0);
+        BridgeCore { version, standing, ..core }
     }
 
     /// What the scripted P4 took or did, and when.
@@ -1271,6 +1334,8 @@ mod tests {
         Op(u8),
         /// It answered an `Abort` with `Idle`.
         Idle,
+        /// A command that is neither an `Identify` nor an update op.
+        Other,
     }
 
     type TookLog = Arc<Mutex<Vec<(Took, tokio::time::Instant)>>>;
@@ -1283,6 +1348,10 @@ mod tests {
     fn scripted_p4(mut plumbing: LinkPlumbing, script: Script) -> TookLog {
         let took = TookLog::default();
         let log = Arc::clone(&took);
+        // As the transport sets it from the `Ready` the caller waited on.
+        if script.incompatible_before {
+            plumbing.compatibility.heard(&other_major(OLD, Trial::Settled, 600_000));
+        }
         tokio::spawn(async move {
             let mut receiver = Receiver::new(Board::Esp32p4);
             let mut slot = Slot(vec![0xFF; 64 * SECTOR]);
@@ -1304,15 +1373,15 @@ mod tests {
                             let trial = script.trials[(*readies).min(script.trials.len() - 1)];
                             *readies += 1;
                             let up = u32::try_from(began.elapsed().as_millis()).unwrap();
-                            events.push(LinkEvent::Again(core(script.boots, trial, 800 + up)));
+                            events.push(script.after(core(script.boots, trial, 800 + up), false));
                             events.extend(script.lines.iter().cloned().map(LinkEvent::Message));
                         } else {
                             let up = u32::try_from(started.elapsed().as_millis()).unwrap();
-                            events.push(LinkEvent::Again(core(OLD, Trial::Settled, 600_000 + up)));
+                            events.push(script.before(core(OLD, Trial::Settled, 600_000 + up)));
                             answered += 1;
                             if held && answered >= script.old_answers {
                                 held = false;
-                                life = Some(reboot(&script, &mut events));
+                                life = Some(reboot(&script, &plumbing, &mut events));
                             }
                         }
                     }
@@ -1331,11 +1400,14 @@ mod tests {
                             }
                             Received::Status(None) => {}
                             Received::Install(_) if answered < script.old_answers => held = true,
-                            Received::Install(_) => life = Some(reboot(&script, &mut events)),
+                            Received::Install(_) => {
+                                life = Some(reboot(&script, &plumbing, &mut events));
+                            }
                         }
                     }
                     // The rebooted P4 has no session, and the sender no longer listens.
-                    _ => {}
+                    HostToBridge::Update(_) => {}
+                    _ => note(Took::Other),
                 }
                 for event in events {
                     if plumbing.events.send(event).await.is_err() {
@@ -1351,17 +1423,26 @@ mod tests {
     }
 
     /// The scripted P4's reboot into its new life, as the link reports it: the new life's start
-    /// and the one `Ready` it has sent.
-    fn reboot(script: &Script, events: &mut Vec<LinkEvent>) -> (tokio::time::Instant, usize) {
+    /// and the one `Ready` it has sent. The transport sets the send rule from that `Ready`.
+    fn reboot(
+        script: &Script,
+        plumbing: &LinkPlumbing,
+        events: &mut Vec<LinkEvent>,
+    ) -> (tokio::time::Instant, usize) {
         let trial = script.trials[0];
-        if script.over == Link::Bluetooth {
+        let uptime_ms = if script.over == Link::Bluetooth {
             let reason = "the bridge disconnected".to_owned();
             let cause = DisconnectCause::Other;
             events.push(LinkEvent::Disconnected { reason, cause });
-            events.push(LinkEvent::Connected(ready(core(script.boots, trial, 0))));
+            0
         } else {
-            events.push(LinkEvent::Connected(ready(core(script.boots, trial, 800))));
+            800
+        };
+        let back = script.after(core(script.boots, trial, uptime_ms), true);
+        if let Some((core, _)) = back.ready() {
+            plumbing.compatibility.heard(&core);
         }
+        events.push(back);
         events.extend(script.lines.iter().cloned().map(LinkEvent::Message));
         (tokio::time::Instant::now(), 1)
     }
@@ -1568,6 +1649,51 @@ mod tests {
         ];
         assert_eq!(heard.said, expected);
         assert!(identifies_after_reboot(&took) > 0, "asked once reconnected");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn update_bridge_installs_when_bridge_starts_incompatible() {
+        // Over USB, from another major to this one: the connection holds, and the frozen core
+        // carries the whole update.
+        let (updated, heard, took) = update_with(|image| Script {
+            incompatible_before: true,
+            ..Script::new(Link::Usb, image.digest())
+        })
+        .await;
+        assert_eq!(updated, Ok(Updated::Installed));
+        assert_eq!(heard.said, [Progress::Installing, Progress::Confirmed]);
+        assert!(!took.lock().unwrap().iter().any(|(what, _)| *what == Took::Other));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn update_bridge_skips_scan_stop_when_bridge_is_incompatible() {
+        // Over Bluetooth a bridge this host cannot read takes no `StopScan`, and stops its own
+        // scan at the `Begin`, so the update says nothing of the scan.
+        let (updated, heard, took) = update_with(|image| Script {
+            incompatible_before: true,
+            ..Script::new(Link::Bluetooth, image.digest())
+        })
+        .await;
+        assert_eq!(updated, Ok(Updated::Installed));
+        let expected = [Progress::Installing, Progress::LinkDropped, Progress::Confirmed];
+        assert_eq!(heard.said, expected);
+        assert!(!took.lock().unwrap().iter().any(|(what, _)| *what == Took::Other), "no stop");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn update_bridge_reads_outcome_from_core_when_bridge_comes_back_incompatible() {
+        // Another major installed: its `Ready` is read for its core alone, and no C6 line is
+        // waited for.
+        let trials = vec![Trial::OnTrial, Trial::Settled];
+        let (updated, heard, took) = update_with(|image| Script {
+            trials,
+            incompatible_after: true,
+            ..Script::new(Link::Usb, image.digest())
+        })
+        .await;
+        assert_eq!(updated, Ok(Updated::Installed));
+        assert_eq!(heard.said, [Progress::Installing, Progress::Confirmed]);
+        assert!(identifies_after_reboot(&took) >= 1, "asked until the image settled");
     }
 
     #[tokio::test(start_paused = true)]

@@ -17,10 +17,15 @@
 //!
 //! A failed update over Bluetooth is recovered over USB, by running `flash-bridge` there.
 //!
-//! **A P4 that cannot take an update names the fix.** One running firmware from another tree
-//! announces a `Ready` this build cannot decode, and one on espflash's default partition table
-//! refuses the `Begin`. Both need one last wired flash. A P4 that sends nothing at all is more
-//! likely held by another program, or still starting, so that advice is kept for a `Ready` that
+//! **A bridge this build reads only for its frozen core is updated all the same.** One on another
+//! major, or another build of this one, answers with a `Ready` whose rest this build does not
+//! read, which every other command refuses (`NotReady::Incompatible`). The core names its image,
+//! and the update needs nothing more, so this command says what it found and updates it.
+//!
+//! **A P4 that cannot take an update names the fix.** One running firmware from before the frozen
+//! core sends frames that fail this build's frame check, and one on espflash's default partition
+//! table refuses the `Begin`. Both need one last wired flash. A P4 that sends nothing at all is
+//! more likely held by another program, or still starting, so that advice is kept for frames that
 //! arrived garbled.
 
 use std::io::{IsTerminal, Write};
@@ -28,6 +33,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use wartui_app::ops::NotReady;
 use wartui_app::update::bridge::{self, Failed, Line, Progress, Updated};
 use wartui_app::update::image::{BridgeImage, Chip};
 use wartui_app::update::release;
@@ -35,8 +41,9 @@ use wartui_bridge::ports::PortCandidate;
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::serial::SerialTransport;
 use wartui_bridge::spec::BridgeSpec;
-use wartui_bridge::{BridgeInfo, LinkHandle};
+use wartui_bridge::{BridgeCore, LinkHandle};
 use wartui_proto::bus::UpdateState;
+use wartui_proto::link::{BRIDGE_VERSION, End, Standing};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::update::Failure;
 
@@ -109,34 +116,51 @@ pub(super) async fn run(args: &Args, target: Target) -> Result<()> {
     }
     let path = obtain(&P4_BRIDGE_APP, &source)?;
     let image = app::checked(&path, BridgeImage::parse(read(&path)?))?;
-    let (link, over, info, label) = crate::interruptible(open(target, label)).await?;
-    update_over_link(link, over, &info, &label, &image).await
+    let (link, over, core, label) = crate::interruptible(open(target, label)).await?;
+    if !core.compatible() {
+        println!("{label:<6} {}", found_text(&core));
+    }
+    update_over_link(link, over, &core, &label, &image).await
+}
+
+/// What this command says of a bridge it reads only for its frozen core, before it updates it.
+fn found_text(core: &BridgeCore) -> String {
+    let bridge = core.version;
+    let against = match core.standing {
+        Standing::Apart { older: End::Bridge } => format!("older than wartui {BRIDGE_VERSION}"),
+        Standing::Apart { older: End::Host } => format!("newer than wartui {BRIDGE_VERSION}"),
+        Standing::OtherBuild | Standing::Same | Standing::Fewer { .. } => {
+            format!("another build than wartui {BRIDGE_VERSION}'s")
+        }
+    };
+    format!("runs bridge firmware {bridge}, {against}; updating it over the frozen core")
 }
 
 /// Open the link to the bridge `target` names and wait for its `Ready`: the link, which it is,
-/// the bridge's announcement, and the label the lines name it by.
-async fn open(target: Target, label: String) -> Result<(LinkHandle, Link, BridgeInfo, String)> {
+/// the `Ready`'s frozen core, and the label the lines name it by. A bridge whose rest this build
+/// cannot read is taken by its core.
+async fn open(target: Target, label: String) -> Result<(LinkHandle, Link, BridgeCore, String)> {
     Ok(match target {
         Target::Usb { board, expected } => {
-            let (link, info) = open_usb(&label, &board.path).await?;
-            ensure!(info.mac == expected, "{label} answered with another address");
-            (link, Link::Usb, info, label)
+            let (link, core) = open_usb(&label, &board.path).await?;
+            ensure!(core.mac == expected, "{label} answered with another address");
+            (link, Link::Usb, core, label)
         }
         Target::Bluetooth { bridge, memory } => {
-            let (link, info) = open_bluetooth(&label, &bridge, memory).await?;
+            let (link, core) = open_bluetooth(&label, &bridge, memory).await?;
             // The transport checked the `Ready` against the name; its address names the lines.
-            let label = mac::short(&info.mac).to_string();
-            (link, Link::Bluetooth, info, label)
+            let label = mac::short(&core.mac).to_string();
+            (link, Link::Bluetooth, core, label)
         }
     })
 }
 
-/// Send `image` to the bridge `info` announced on `link`, over `over`, to the outcome. The first
-/// ctrl-c is the update's stop, and a second exits.
+/// Send `image` to the bridge whose `Ready` carried `core` on `link`, over `over`, to the
+/// outcome. The first ctrl-c is the update's stop, and a second exits.
 async fn update_over_link(
     mut link: LinkHandle,
     over: Link,
-    info: &BridgeInfo,
+    core: &BridgeCore,
     label: &str,
     image: &BridgeImage,
 ) -> Result<()> {
@@ -147,7 +171,7 @@ async fn update_over_link(
         let _ = stopped.await;
     };
     let updated =
-        bridge::update(&mut link, over, info.image, image, stop, |said| line().take(said));
+        bridge::update(&mut link, over, core.image, image, stop, |said| line().take(said));
     tokio::pin!(updated);
     let mut stopping = Some(stopping);
     let updated = loop {
@@ -174,7 +198,7 @@ async fn update_over_link(
 }
 
 /// Open the P4 bridge on `path` over its CH343 and wait for its `Ready`.
-async fn open_usb(label: &str, path: &str) -> Result<(LinkHandle, BridgeInfo)> {
+async fn open_usb(label: &str, path: &str) -> Result<(LinkHandle, BridgeCore)> {
     // By path: the probe that chose it has already asked, and the reboot leaves the CH343 where
     // it is.
     let mut link = SerialTransport::with_spec(
@@ -186,8 +210,12 @@ async fn open_usb(label: &str, path: &str) -> Result<(LinkHandle, BridgeInfo)> {
     .context("opening the link")?;
     let waited = crate::status::wait_for_ready_or_why(&mut link, Link::Usb, READY_WAIT).await;
     match waited.ready {
-        Ok(Some(info)) => Ok((link, info)),
-        Err(why) => bail!("{}", no_ready_text(label, path, &why, waited.garbled)),
+        Ok(Some(info)) => Ok((link, info.core())),
+        Err(NotReady::Incompatible(core)) => Ok((link, core)),
+        Err(why) => {
+            let why = crate::status::not_ready_text(why);
+            bail!("{}", no_ready_text(label, path, &why, waited.garbled))
+        }
         Ok(None) => {
             let why = format!("no answer in {} s", READY_WAIT.as_secs());
             bail!("{}", no_ready_text(label, path, &why, waited.garbled))
@@ -201,14 +229,18 @@ async fn open_bluetooth(
     label: &str,
     bridge: &BridgeSpec,
     memory: BridgeMemory,
-) -> Result<(LinkHandle, BridgeInfo)> {
+) -> Result<(LinkHandle, BridgeCore)> {
     let named = bridge.to_string();
     let mut link = crate::open(Some(&named), None, Link::Bluetooth, memory)?;
     let within = crate::connect_wait(Link::Bluetooth);
     let waited = crate::status::wait_for_ready_or_why(&mut link, Link::Bluetooth, within).await;
     match waited.ready {
-        Ok(Some(info)) => Ok((link, info)),
-        Err(why) => bail!("{}", no_ready_over_bluetooth(label, &why, waited.garbled)),
+        Ok(Some(info)) => Ok((link, info.core())),
+        Err(NotReady::Incompatible(core)) => Ok((link, core)),
+        Err(why) => {
+            let why = crate::status::not_ready_text(why);
+            bail!("{}", no_ready_over_bluetooth(label, &why, waited.garbled))
+        }
         Ok(None) if waited.garbled => {
             let why = format!("no answer in {} s", within.as_secs());
             bail!("{}", no_ready_over_bluetooth(label, &why, waited.garbled))
@@ -222,22 +254,24 @@ async fn open_bluetooth(
 fn no_ready_over_bluetooth(board: &str, why: &str, garbled: bool) -> String {
     if garbled {
         format!(
-            "{board} answered over Bluetooth in a form this build cannot read ({why}): it runs \
-             firmware from another tree. Flash it once by hand, per {FIRST_FLASH}"
+            "{board} sent frames over Bluetooth that fail this build's frame check ({why}): it \
+             runs firmware from before the frozen core, which takes no update over its link. \
+             Flash it once by hand, per {FIRST_FLASH}"
         )
     } else {
         format!("{board} did not announce itself over Bluetooth: {why}")
     }
 }
 
-/// Why no `Ready` arrived from `board` on `path`, and what to do. Frames that did not decode
-/// are a `Ready` from firmware built from another tree; silence is a held port or a bridge
-/// still starting.
+/// Why no `Ready` arrived from `board` on `path`, and what to do. Frames that fail the frame
+/// check are firmware from before the frozen core, which a wired flash alone updates; silence is
+/// a held port or a bridge still starting.
 fn no_ready_text(board: &str, path: &str, why: &str, garbled: bool) -> String {
     if garbled {
         format!(
-            "{board} on {path} answered in a form this build cannot read ({why}): it runs \
-             firmware from another tree. Flash it once by hand, per {FIRST_FLASH}"
+            "{board} on {path} sent frames that fail this build's frame check ({why}): it runs \
+             firmware from before the frozen core, which takes no update over its link. Flash it \
+             once by hand, per {FIRST_FLASH}"
         )
     } else {
         format!(
@@ -309,8 +343,9 @@ fn port_stall_text(percent: u8) -> String {
 fn failure_text(failure: Failure, image_known: bool) -> String {
     match failure {
         Failure::Silent if !image_known => format!(
-            "the bridge did not answer the update, and its image carries no digest: it runs \
-             firmware from another tree. Flash it once by hand, per {FIRST_FLASH}"
+            "the bridge did not answer the update, and its `Ready` names no image: it runs \
+             firmware that takes no update over its link. Flash it once by hand, per \
+             {FIRST_FLASH}"
         ),
         Failure::Silent => "the bridge stopped answering the update".to_owned(),
         Failure::Refused(UpdateState::FlashError) => format!(
@@ -489,8 +524,8 @@ mod tests {
     #[test]
     fn flash_p4_names_wired_flash_when_bridge_reports_no_digest() {
         let text = failure_text(Failure::Silent, false);
-        assert!(text.contains("another tree") && text.contains(FIRST_FLASH), "{text}");
-        assert!(!failure_text(Failure::Silent, true).contains("another tree"));
+        assert!(text.contains("names no image") && text.contains(FIRST_FLASH), "{text}");
+        assert!(!failure_text(Failure::Silent, true).contains(FIRST_FLASH));
     }
 
     #[test]
@@ -520,16 +555,36 @@ mod tests {
     }
 
     #[test]
-    fn flash_p4_names_wired_flash_when_ready_arrived_garbled() {
+    fn flash_p4_names_wired_flash_when_frames_fail_the_frame_check() {
+        // A build from before the frozen core: no `Ready` of it reads, so only a wire reaches it.
         let text = no_ready_text("71:F4", "/dev/ttyACM0", "no answer in 10 s", true);
-        assert!(text.contains("another tree") && text.contains(FIRST_FLASH), "{text}");
+        assert!(text.contains("before the frozen core") && text.contains(FIRST_FLASH), "{text}");
+        let text = no_ready_over_bluetooth("71:F4", "no answer in 30 s", true);
+        assert!(text.contains("before the frozen core") && text.contains(FIRST_FLASH), "{text}");
+    }
+
+    #[test]
+    fn flash_p4_says_what_it_found_when_bridge_is_incompatible() {
+        let version = wartui_proto::bus::Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        let core = BridgeCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+            image: None,
+            version,
+            trial: wartui_proto::link::Trial::Settled,
+            uptime_ms: 400,
+            standing: Standing::of(version, BRIDGE_VERSION, false),
+        };
+        let text = found_text(&core);
+        assert!(text.contains(&format!("{version}, newer than wartui {BRIDGE_VERSION}")), "{text}");
+        let other = BridgeCore { version: BRIDGE_VERSION, standing: Standing::OtherBuild, ..core };
+        assert!(found_text(&other).contains("another build"), "{}", found_text(&other));
     }
 
     #[test]
     fn flash_p4_names_held_port_when_nothing_arrived() {
         let text = no_ready_text("71:F4", "/dev/ttyACM0", "no answer in 10 s", false);
         assert!(text.contains("wartui run") && text.contains("still starting"), "{text}");
-        assert!(!text.contains("another tree") && !text.contains(FIRST_FLASH), "{text}");
+        assert!(!text.contains("frame check") && !text.contains(FIRST_FLASH), "{text}");
     }
 
     #[test]

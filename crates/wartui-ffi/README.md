@@ -98,8 +98,18 @@ the app is built against.
   cancels a node update, telling each node under way. It stops a bridge update only while the
   image is sent, ending the update's session on the bridge, which keeps the image it runs, with
   `Stopped`; from `Installing` on, the update runs to its outcome.
-- **A bridge update needs the bridge's announcement**, from `link.ready`. The link keeps the
-  latest one it reads, so after an install it names the new image.
+- **A bridge update needs the bridge's `Ready`**, from `link.ready`. The link keeps the latest
+  one it reads, so after an install it names the new image.
+- **A bridge on another major, or another build of this one, takes an update and nothing else.**
+  The two share only the frozen core of the link, which names, updates and restarts the bridge.
+  `link.ready` refuses it with `ReadyError.Incompatible`, carrying both versions and how they
+  stand (`Standing`: `Apart` names the older end, `OtherBuild` the same major read as another
+  build); `Session.start` refuses it with `StartError.Incompatible` and creates no capture, and
+  `hearNodes` and `updateNodes` with `UpdateError.Incompatible`. `updateBridge` updates it, which
+  is the fix when the bridge is older; when the library is older, the app is. A bridge a minor
+  apart is captured over, and the view says so as a `Note.BridgeMinorApart`. A capture whose
+  bridge turns incompatible under it shows `Fault.BridgeIncompatible` first, in place of a link
+  fault.
 
 ## What a phone's adapter keeps to
 

@@ -9,17 +9,18 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use wartui_app::session::{Controls, Refused, Session, SessionConfig};
+use wartui_app::session::{Controls, Refusal, Refused, Session, SessionConfig};
 use wartui_app::settings::{Config, Link, Settings, SettingsStore};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::sim::{SimConfig, SimTransport};
-use wartui_bridge::{LinkEvent, LinkHandle};
+use wartui_bridge::{BridgeCore, LinkEvent, LinkHandle, link_pair};
 use wartui_core::engine::{Command, Snapshot};
 use wartui_core::gps::Gps;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, Tier};
 use wartui_core::store::{StoreConfig, StoreError, open_readonly};
 use wartui_core::ubx;
-use wartui_proto::link::{BridgeToHost, HostToBridge};
+use wartui_proto::bus::Version;
+use wartui_proto::link::{BRIDGE_VERSION, BridgeToHost, HostToBridge, Standing, Trial};
 
 use common::{BRIDGE, Fake, OTHER_BRIDGE, snapshot};
 
@@ -162,10 +163,41 @@ async fn session_refuses_start_when_capture_exists() {
 
     let refused = Session::start(config(&db), fleet(1), None, None, Settings::default());
 
-    let Err(Refused { error, link }) = refused else { panic!("started over an existing file") };
+    let Err(Refused { reason: Refusal::Store(error), link }) = refused else {
+        panic!("started over an existing file")
+    };
     assert!(matches!(error, StoreError::Exists(_)), "{error:?}");
     assert_eq!(std::fs::read(&db).expect("still there"), b"", "the file is left alone");
     link.send_bulk(HostToBridge::GetStatus).expect("the link comes back, still open");
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_refuses_start_when_announced_bridge_is_incompatible() {
+    // A front end waited on the link, and its `Ready` was one this host reads only for its core.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db = dir.path().join("wartui.db");
+    let (mut link, plumbing) = link_pair();
+    let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+    let core = BridgeCore {
+        mac: BRIDGE,
+        image: None,
+        version,
+        trial: Trial::Settled,
+        uptime_ms: 400,
+        standing: Standing::of(version, BRIDGE_VERSION, false),
+    };
+    plumbing.compatibility.heard(&core);
+    plumbing.events.send(LinkEvent::Incompatible { core, fresh: true }).await.expect("read");
+    link.recv().await.expect("the unread `Ready`");
+
+    let refused = Session::start(config(&db), link, None, None, Settings::default());
+
+    let Err(Refused { reason: Refusal::Incompatible(refused), link }) = refused else {
+        panic!("started over an incompatible bridge")
+    };
+    assert_eq!(refused, core);
+    assert!(!db.exists(), "no capture file is left behind");
+    link.send_bulk(HostToBridge::Identify).expect("the link comes back, still open");
 }
 
 #[tokio::test(start_paused = true)]

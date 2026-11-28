@@ -11,8 +11,8 @@
 //! **The announcement stays current.** The transport announces a bridge once per life, and the
 //! next capture is handed the last one. The handle keeps it ([`LinkHandle::announced`]), so a link
 //! parks with the announcement its last reader left it, and no caller can hand it another. A
-//! `Connected` while parked is the announcement, and a `Disconnected`, whatever its cause, clears
-//! it: the transport announces again once the bridge is back. A transport that ended is read no
+//! `Connected` while parked is the announcement, and an `Incompatible` or a `Disconnected`,
+//! whatever its cause, clears it: the transport announces again once the bridge is back. A transport that ended is read no
 //! more, and comes back with no announcement. The task mirrors the handle's into a watch, so the
 //! announcement is readable while parked ([`Parked::announced`]) and a save between captures
 //! remembers the bridge connected now.
@@ -80,7 +80,11 @@ async fn keep_read(
             // Sent or dropped, either is the stop.
             _ = &mut stopped => return link,
             event = link.recv() => match event {
-                Some(LinkEvent::Connected(_) | LinkEvent::Disconnected { .. }) => {
+                Some(
+                    LinkEvent::Connected(_)
+                    | LinkEvent::Incompatible { .. }
+                    | LinkEvent::Disconnected { .. },
+                ) => {
                     announced.send_replace(link.announced().cloned());
                 }
                 Some(LinkEvent::Again(_) | LinkEvent::Message(_) | LinkEvent::Garbled(_)) => {}

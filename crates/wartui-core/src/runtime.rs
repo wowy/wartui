@@ -84,7 +84,8 @@ pub const COMMAND_QUEUE: usize = 8;
 /// its `Connected` already: a link a previous capture gave back, or one a front end waited on for
 /// the bridge's `Ready`. The transport sends `Connected` again only on a new life, so the capture
 /// takes it as its first event, through the same path as one off the link. `None` is a link not
-/// yet read from.
+/// yet read from, or one whose last `Ready` went unread ([`LinkHandle::reached`] with no
+/// [`LinkHandle::announced`]): that capture starts on the `Incompatible` the link already read.
 ///
 /// `health` is called once per host sample ([`HOST_SAMPLE`]) for the host's own health. `None`
 /// records [`Health::default`], every value unread.
@@ -121,7 +122,10 @@ pub async fn drive(
     let mut sky_lists = false;
     // Once `stop` has fired on a capture: when to give up waiting for the P4 to stop.
     let mut quitting: Option<tokio::time::Instant> = None;
-    let mut first = announced.map(|info| Event::Link(LinkEvent::Connected(info)));
+    let mut first = announced.map(|info| Event::Link(LinkEvent::Connected(info))).or_else(|| {
+        let core = link.reached().filter(|core| !core.compatible() && link.announced().is_none());
+        core.map(|&core| Event::Link(LinkEvent::Incompatible { core, fresh: false }))
+    });
 
     loop {
         let event = if let Some(event) = first.take() {
@@ -173,7 +177,11 @@ pub async fn drive(
                 engine.position().stand_down(now_ms, engine.bridge_connected());
                 continue;
             }
-            Event::Link(LinkEvent::Connected(_) | LinkEvent::Disconnected { .. }) => {
+            Event::Link(
+                LinkEvent::Connected(_)
+                | LinkEvent::Incompatible { .. }
+                | LinkEvent::Disconnected { .. },
+            ) => {
                 if let Some(gps) = &bridge_gps {
                     gps.reset_stream();
                 }
@@ -190,7 +198,12 @@ pub async fn drive(
         // disconnect counts.
         let restands = matches!(
             event,
-            Event::Tick | Event::Link(LinkEvent::Connected(_) | LinkEvent::Disconnected { .. })
+            Event::Tick
+                | Event::Link(
+                    LinkEvent::Connected(_)
+                        | LinkEvent::Incompatible { .. }
+                        | LinkEvent::Disconnected { .. }
+                )
         );
 
         let publish = matches!(
@@ -198,8 +211,9 @@ pub async fn drive(
             Event::Tick
                 | Event::Command(_)
                 | Event::Link(
-                    wartui_bridge::LinkEvent::Connected(_)
-                        | wartui_bridge::LinkEvent::Disconnected { .. }
+                    LinkEvent::Connected(_)
+                        | LinkEvent::Incompatible { .. }
+                        | LinkEvent::Disconnected { .. }
                 )
         );
 

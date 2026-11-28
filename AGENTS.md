@@ -151,8 +151,10 @@ the bottom one and a crate of its own.
 - **`crates/wartui-bridge`** — host side of the link. Everything above talks to a `LinkHandle`
   and cannot tell a real bridge, over USB (`serial`) or Bluetooth (`ble`), from the fake
   fleet (`sim`). The two transports differ only where their links do; what a connection admits
-  from the bridge's stream is one rule both read through (`gate`), both take a bridge's name
-  (`spec`) and write host frames (`wire`) the same way (`src/lib.rs` `//!`). `wartui`'s
+  from the bridge's stream, and whether its last `Ready` was readable, is one rule both read
+  through (`gate`), and the handle's sends refuse an incompatible bridge all but the frozen
+  messages (`src/lib.rs`); both take a bridge's name (`spec`) and write host frames (`wire`) the
+  same way (`src/lib.rs` `//!`). `wartui`'s
   `main.rs::open` is the one place a link is picked. It also owns what the OS says a serial port
   is (`ports`) and the judgments made on that, so anything else that opens a device shares one
   description. Both transports are generic over the byte pipes in `pipe` (`pipe::Ports`,
@@ -168,9 +170,10 @@ the bottom one and a crate of its own.
   whether or not a view draws, and gives the link back, open, when it stops) and `ops` (what a
   front end asks a bridge outside a capture: the wait for its `Ready`, a status read, a setting
   sent and read back, the pairing window, the bonds cleared, a power-cycle, a format, the scan
-  started, and the link parked between captures, read so nothing backs up; typed, and handing
-  each fault the bridge reports to the caller) and `view` (what a fleet view shows of a
-  snapshot, decided once as plain data: the faults and their order, the notes, each node's
+  started, and the link parked between captures, read so nothing backs up; typed, handing
+  each fault the bridge reports to the caller, and refusing an incompatible bridge alike) and
+  `view` (what a fleet view shows of a snapshot, decided once as plain data: the faults and their
+  order, an incompatible bridge first, the notes, a bridge a minor apart among them, each node's
   state, the planner and the receiver, the settings in force and the bridge's answers to a
   power-cycle and a format) and `export` (a capture written as a WiGLE CSV, and what a report
   calls its nodes) and `upload` (a capture sent to WDGWars
@@ -498,7 +501,8 @@ edit stops; follow the pointer before changing the rule.
   through a `close` that no signal can interrupt — 30 s measured against a node, during which the
   process cannot exit. The transport leaves a thread held in `write` or `close` behind after 2 s,
   and `main` names the port it holds. Once proven, a USB connection that has written nothing for
-  10 s sends a `GetStatus`, since the P4 stops writing to a host it has not heard from in 15 s.
+  10 s sends a `GetStatus`, or an `Identify` toward an incompatible bridge, which decodes no other
+  host frame, since the P4 stops writing to a host it has not heard from in 15 s.
   Over Bluetooth
   a connection asks every second once its notifications are open, because a bonded central's
   subscription outlives its connection and the bridge's `Ready` can go by before the transport
@@ -556,6 +560,15 @@ edit stops; follow the pointer before changing the rule.
 - **The host link's core is frozen, even before 1.0**, so any later host can reach, identify,
   update and restart any bridge that carries it. `link::FRAME_VERSION` is 2 and never moves.
   → `crates/wartui-proto/src/link/mod.rs` `//!`
+- **A bridge on another major, or another build of this one, is incompatible: the host shares the
+  frozen core with it and nothing else.** Its `Ready`'s rest goes unread, and it is reported as
+  `LinkEvent::Incompatible`, never as a connection. Toward it the host reads `Ready` and `Update`,
+  sends `Identify`, `Reset` and `Update`, starts no capture and updates it; every other command
+  refuses it with one wording, and `flash-bridge` and a phone's `updateBridge` are the fix. A
+  bridge a minor apart is compatible and a note. The send rule is enforced once, in `LinkHandle`'s
+  sends, from a flag the transport sets from each `Ready`, since over USB a bridge turns
+  compatible under a held connection. → `crates/wartui-bridge/src/lib.rs` `//!`, `src/gate.rs`
+  `//!`; `crates/wartui-app/src/view/faults.rs` `//!`
 - **The P4's core 1 stays off.** Every future, the microSD card's included, is joined on core 0,
   and nothing calls `start_second_core`. esp-storage stalls the other core for every flash write,
   wherever it is, so a core 1 frozen holding a lock leaves core 0 spinning on it: on the bench,

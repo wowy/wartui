@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use indexmap::IndexSet;
 use wartui_bridge::sim::minor_behind;
-use wartui_bridge::{BridgeInfo, DisconnectCause, LinkEvent};
+use wartui_bridge::{BridgeCore, BridgeInfo, DisconnectCause, LinkEvent};
 use wartui_core::ActionBatch;
 use wartui_core::engine::{
     Command, Counters, EngineConfig, Event, FleetEngine, HostSample, NodeView, Now, StorePeaks,
@@ -35,7 +35,7 @@ use wartui_proto::link::{
     BluetoothStatus, BridgeHealth, BridgeToHost, Central, FromNodeBody, GPS_BUS_REFUSED,
     GPS_RECEIVER_ANSWERED, HostOwner, HostToBridge, LinkError, LogStr, LoopPhase, NO_GPS_RECEIVER,
     PairWindow, PowerOutcome, QueueId, QueueStat, QueueStats, RadioLinkStats, SdFormatOutcome,
-    SdLog, SdLogState, SdState, SdStatus, USB_TOOK_BRIDGE,
+    SdLog, SdLogState, SdState, SdStatus, Standing, USB_TOOK_BRIDGE,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::node::ASSIGNED_BEAT_MS;
@@ -4903,4 +4903,65 @@ fn engine_logs_fix_held_without_old_uptime_when_bridge_reconnects_before_status(
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].starts_with("message=gps fix held"), "{lines:?}");
     assert!(!lines[0].contains("bridge_up_s"), "{lines:?}");
+}
+
+/// A `Ready` from a bridge one major past this host's, whose rest the host did not read.
+fn incompatible() -> Event {
+    let version = Version::new(wartui_proto::link::BRIDGE_VERSION.major + 1, 0, 0);
+    let core = BridgeCore {
+        mac: [0x02, 0x00, 0x5E, 0x10, 0x9D, 0x24],
+        image: None,
+        version,
+        trial: wartui_proto::link::Trial::Settled,
+        uptime_ms: 400,
+        standing: Standing::of(version, wartui_proto::link::BRIDGE_VERSION, false),
+    };
+    Event::Link(LinkEvent::Incompatible { core, fresh: true })
+}
+
+#[test]
+fn engine_sends_nothing_when_bridge_is_incompatible() {
+    let clock = Clock::new();
+    let config = EngineConfig { auto_start: true, ..EngineConfig::default() };
+    let mut engine = FleetEngine::new(config, clock.at(0));
+    let batch = engine.handle(incompatible(), clock.at(0));
+    assert!(batch.urgent.is_empty() && batch.bulk.is_empty() && batch.records.is_empty());
+    // No poll on the ticks, no start, and no command reaches the link.
+    for secs in 1..30 {
+        let batch = engine.handle(Event::Tick, clock.at(secs));
+        assert!(batch.bulk.is_empty() && batch.urgent.is_empty(), "at {secs}s: {batch:?}");
+    }
+    let asked = engine.handle(Event::Command(Command::SetBluetooth(true)), clock.at(30));
+    assert!(asked.bulk.is_empty() && asked.urgent.is_empty(), "{asked:?}");
+    let stopped = engine.handle(Event::Command(Command::StopScan), clock.at(30));
+    assert!(stopped.bulk.is_empty() && stopped.urgent.is_empty(), "{stopped:?}");
+    // An update's answer, the one other message such a bridge sends, records nothing.
+    let status = BridgeToHost::Update(
+        wartui_proto::link::UpdateStatusBytes::from_slice(&[5, 1, 0, 0, 0, 0, 0]).expect("fits"),
+    );
+    let batch = engine.handle(Event::Link(LinkEvent::Message(status)), clock.at(31));
+    assert!(batch.records.is_empty() && batch.bulk.is_empty());
+    assert!(!engine.bridge_connected());
+
+    // A `Connected` restores normal service.
+    let back = engine.handle(connected(), clock.at(32));
+    assert!(back.bulk.contains(&HostToBridge::GetStatus), "{back:?}");
+    assert!(engine.snapshot(clock.at(32), StoreStats::default()).incompatible.is_none());
+}
+
+#[test]
+fn engine_drops_bridge_info_when_bridge_turns_incompatible() {
+    // Over USB the CH343 holds the connection while the bridge reboots into another major.
+    let clock = Clock::new();
+    let mut engine = engine(EngineConfig::default(), &clock);
+    engine.handle(connected(), clock.at(0));
+    assert!(engine.bridge_connected());
+    engine.handle(incompatible(), clock.at(1));
+    let snapshot = engine.snapshot(clock.at(1), StoreStats::default());
+    assert!(snapshot.bridge.is_none(), "the dead life's announcement is gone");
+    assert!(!snapshot.link_up);
+    assert_eq!(snapshot.link_error, None, "no generic link fault");
+    let core = snapshot.incompatible.expect("the bridge reached");
+    assert_eq!(core.standing, Standing::Apart { older: wartui_proto::link::End::Host });
+    assert!(!engine.bridge_connected());
 }

@@ -22,6 +22,11 @@
 //! link back once the work ends. The link goes back with the latest announcement it read, so
 //! after a bridge install it names the new image, and after the bridge went it names none.
 //!
+//! **A bridge this library cannot read past the frozen core is updated, and nothing else.**
+//! [`Link::update_bridge`] needs only the core the link reached, which names the running image;
+//! [`Link::hear_nodes`] and [`Link::update_nodes`] need the messages outside it, and refuse
+//! ([`UpdateError::Incompatible`]).
+//!
 //! **A plan holds its images by board.** `wartui_app::update::image::NodeImage` shares its bytes
 //! behind an `Arc`, so a [`NodeImage`] gives each plan made from it a clone of that handle, never
 //! a copy of the image.
@@ -44,9 +49,10 @@ use wartui_app::update::nodes::{
 };
 use wartui_app::update::release::{self, BRIDGE_APP_ASSET, ReleaseError, Releases};
 use wartui_app::view::SlotShown;
-use wartui_bridge::{LinkHandle, SendError};
+use wartui_bridge::{BridgeCore, LinkHandle, SendError};
 use wartui_core::ota::{self, Failure, Outcome, Phase};
-use wartui_proto::bus::{Board, Capabilities, NodeBoard, Slot, UpdateState};
+use wartui_proto::bus::{Board, Capabilities, NodeBoard, Slot, UpdateState, Version};
+use wartui_proto::link::{BRIDGE_VERSION, Standing};
 use wartui_proto::mac::{self, Mac};
 use wartui_proto::radio_link::update::Failure as AppSenderFailure;
 
@@ -481,6 +487,18 @@ pub enum UpdateError {
     /// remember one.
     #[error("the link is pinned to no bridge")]
     NotPinned,
+    /// The bridge shares only the frozen core with this library, which carries no node update:
+    /// `bridge` is its firmware, `host` the one this library builds, and `standing` another major
+    /// or another build. `updateBridge` updates it first.
+    #[error("the bridge {bridge:?} shares only the frozen core with this library")]
+    Incompatible { bridge: Version, host: Version, standing: Standing },
+}
+
+impl UpdateError {
+    /// The refusal of a bridge whose last `Ready` went unread.
+    fn incompatible(core: BridgeCore) -> Self {
+        Self::Incompatible { bridge: core.version, host: BRIDGE_VERSION, standing: core.standing }
+    }
 }
 
 /// The link, lent for an update, with the announcement it holds: refused unless it takes
@@ -890,6 +908,8 @@ pub enum CutShort {
     Upload { failure: SenderFailure },
     /// The bridge lost the image after checking it.
     CacheLost,
+    /// The bridge shares only the frozen core with this library, which carries no node update.
+    Incompatible { bridge: Version, host: Version, standing: Standing },
 }
 
 impl From<AppCutShort> for CutShort {
@@ -898,6 +918,11 @@ impl From<AppCutShort> for CutShort {
             AppCutShort::BeforeStart => Self::BeforeStart,
             AppCutShort::Upload(failure) => Self::Upload { failure: failure.into() },
             AppCutShort::CacheLost => Self::CacheLost,
+            AppCutShort::Incompatible(core) => Self::Incompatible {
+                bridge: core.version,
+                host: BRIDGE_VERSION,
+                standing: core.standing,
+            },
         }
     }
 }
@@ -913,6 +938,8 @@ pub enum NodesFailed {
     Canceled,
     /// `failed` of `total` nodes did not update.
     Nodes { failed: u32, total: u32 },
+    /// The bridge shares only the frozen core with this library, which carries no node update.
+    Incompatible { bridge: Version, host: Version, standing: Standing },
 }
 
 /// `count` as a `u32`, saturating.
@@ -931,6 +958,11 @@ impl From<AppFailed> for NodesFailed {
             AppFailed::Nodes { failed, total } => {
                 Self::Nodes { failed: count(failed), total: count(total) }
             }
+            AppFailed::Incompatible(core) => Self::Incompatible {
+                bridge: core.version,
+                host: BRIDGE_VERSION,
+                standing: core.standing,
+            },
         }
     }
 }
@@ -987,6 +1019,8 @@ pub enum QueueFailure {
     Closed,
     /// The queue is full.
     Full,
+    /// The bridge shares only the frozen core with this library, and takes no other message.
+    Incompatible,
 }
 
 /// Which link an update went over.
@@ -1044,9 +1078,9 @@ pub enum BridgeUpdateFailed {
     /// A session or another call holds the link.
     #[error("the link is in use")]
     InUse,
-    /// The link holds no announcement from the bridge, which names the image it runs: wait for
-    /// one with `ready` first.
-    #[error("no bridge has announced itself")]
+    /// The link has reached no bridge, whose `Ready` names the image it runs: wait for one with
+    /// `ready` first. A bridge `ready` refused as incompatible has been reached.
+    #[error("no bridge has answered")]
     NotAnnounced,
     /// As [`UpdateError::NotPinned`].
     #[error("the link is pinned to no bridge")]
@@ -1073,6 +1107,7 @@ impl From<Failed> for BridgeUpdateFailed {
                 failure: match error {
                     SendError::Closed => QueueFailure::Closed,
                     SendError::Full => QueueFailure::Full,
+                    SendError::Incompatible(_) => QueueFailure::Incompatible,
                 },
             },
             Failed::NoComeBack { over, secs } => {
@@ -1146,8 +1181,9 @@ impl Link {
     ///
     /// # Errors
     /// [`UpdateError::NotPinned`] for a Bluetooth link pinned to no bridge,
-    /// [`UpdateError::InUse`] or [`UpdateError::Closed`] for a link not idle, and
-    /// [`UpdateError::Closed`] when the transport ends while listening.
+    /// [`UpdateError::InUse`] or [`UpdateError::Closed`] for a link not idle,
+    /// [`UpdateError::Incompatible`] for a bridge this library reads only for its frozen core,
+    /// and [`UpdateError::Closed`] when the transport ends while listening.
     pub async fn hear_nodes(&self, period_ms: u32) -> Result<Arc<NodesHeard>, UpdateError> {
         let inner = self.shared();
         let period = Duration::from_millis(u64::from(period_ms));
@@ -1191,8 +1227,9 @@ impl Link {
     }
 
     /// Send `image` to the bridge over this link, wait out its reboot, and read the outcome.
-    /// Needs the bridge's announcement (`ready`), which names the image it runs. The link keeps
-    /// the latest announcement it reads, so after an install it names the new image.
+    /// Needs the bridge's `Ready`, which names the image it runs: an announcement from `ready`, or
+    /// the core of a bridge `ready` refused as incompatible, which this updates all the same. The
+    /// link keeps the latest `Ready` it reads, so after an install it names the new image.
     ///
     /// `stopper`, or a phone that stops awaiting, stops the update while the image is sent: it
     /// ends the partial image's session on the bridge with `Abort`, and the bridge keeps the image
@@ -1238,6 +1275,10 @@ async fn hear(
     dropped: oneshot::Receiver<()>,
 ) -> Result<Arc<NodesHeard>, UpdateError> {
     let mut handle = lend(&inner).await?;
+    if let Some(core) = handle.incompatible() {
+        inner.give_back(handle);
+        return Err(UpdateError::incompatible(core));
+    }
     let over = if inner.is_simulated() { Over::Usb } else { Over::Bluetooth };
     // Both are safe to drop mid-read: the handle keeps the announcement it reads.
     let heard = tokio::select! {
@@ -1281,6 +1322,10 @@ async fn update_nodes(
     dropped: oneshot::Receiver<()>,
 ) -> Result<NodesUpdated, UpdateError> {
     let mut handle = lend(&inner).await?;
+    if let Some(core) = handle.incompatible() {
+        inner.give_back(handle);
+        return Err(UpdateError::incompatible(core));
+    }
     let say = |progress: nodes::Progress| {
         if let Some(listener) = &listener {
             // A listener that fails is the phone's to notice; the update goes on.
@@ -1303,10 +1348,14 @@ async fn update_bridge(
 ) -> Result<BridgeUpdated, BridgeUpdateFailed> {
     let mut handle = lend(&inner).await.map_err(|error| match error {
         UpdateError::InUse => BridgeUpdateFailed::InUse,
-        UpdateError::Closed => BridgeUpdateFailed::Closed,
         UpdateError::NotPinned => BridgeUpdateFailed::NotPinned,
+        // `lend` refuses no bridge for what it runs.
+        UpdateError::Closed | UpdateError::Incompatible { .. } => BridgeUpdateFailed::Closed,
     })?;
-    let Some(running) = handle.announced().map(|bridge| bridge.image) else {
+    // A bridge this library reads only for its core announced nothing, and its core names the
+    // image all the same.
+    let reached = handle.reached().map(|core| core.image);
+    let Some(running) = handle.announced().map(|bridge| bridge.image).or(reached) else {
         inner.give_back(handle);
         return Err(BridgeUpdateFailed::NotAnnounced);
     };

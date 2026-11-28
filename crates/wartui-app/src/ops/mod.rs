@@ -4,7 +4,8 @@
 //!
 //! **Typed, and printing nothing.** Every wait ends in a [`LinkError`] when the link goes down,
 //! closes, cannot queue a command or the answer does not come in time, and the front end words
-//! it. A fault the bridge reports while a wait runs, an `Error` message such as a P4 updating its
+//! it. A bridge this host cannot read past the frozen core refuses every command here alike
+//! ([`LinkError::Incompatible`], [`NotReady::Incompatible`]). A fault the bridge reports while a wait runs, an `Error` message such as a P4 updating its
 //! radio, is handed to the caller's `fault` as it arrives: the bridge still answers, so a fault
 //! never ends a wait.
 //!
@@ -20,7 +21,7 @@ mod ready;
 use std::time::Duration;
 
 use tokio::time::error::Elapsed;
-use wartui_bridge::{LinkEvent, LinkHandle, SendError};
+use wartui_bridge::{BridgeCore, LinkEvent, LinkHandle, SendError};
 use wartui_proto::bus::{MAX_SLOTS, Slot};
 use wartui_proto::fan::{FanDuty, FanStats, TACH_WINDOW_MS};
 use wartui_proto::fleet::{Member, Report, ScanMode};
@@ -98,6 +99,21 @@ pub enum LinkError {
     /// A command could not be queued.
     #[error("{error}")]
     Queue { request: Request, error: SendError },
+    /// The bridge shares only the frozen core with this host, so it takes no command here.
+    #[error("the bridge {} shares only the frozen core with this host", .0.version)]
+    Incompatible(BridgeCore),
+}
+
+impl LinkError {
+    /// A command for `request` that `error` kept from being queued: [`Self::Incompatible`] for a
+    /// bridge this host cannot read, else [`Self::Queue`].
+    #[must_use]
+    pub fn queueing(request: Request, error: SendError) -> Self {
+        match error {
+            SendError::Incompatible(core) => Self::Incompatible(core),
+            error => Self::Queue { request, error },
+        }
+    }
 }
 
 /// A bridge's `Status`, its fields as the message carries them.
@@ -220,7 +236,7 @@ impl Seen {
 
 /// Queue `command` in the bulk queue, for `request`.
 fn send(link: &LinkHandle, command: HostToBridge, request: Request) -> Result<(), LinkError> {
-    link.send_bulk(command).map_err(|error| LinkError::Queue { request, error })
+    link.send_bulk(command).map_err(|error| LinkError::queueing(request, error))
 }
 
 /// One link event while a wait runs: the message to look at, a fault handed over, or the end.
@@ -482,7 +498,7 @@ pub async fn start_scan(
     fault: &mut dyn FnMut(&str),
 ) -> Result<Option<Seen>, LinkError> {
     link.send_urgent(HostToBridge::StartScan { bluetooth })
-        .map_err(|error| LinkError::Queue { request: Request::StartScan, error })?;
+        .map_err(|error| LinkError::queueing(Request::StartScan, error))?;
     send(link, HostToBridge::GetStatus, Request::Status)?;
     let mode = if bluetooth { ScanMode::WifiBluetooth } else { ScanMode::Wifi };
     let mut seen = Seen::default();

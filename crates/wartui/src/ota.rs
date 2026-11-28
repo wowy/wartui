@@ -235,6 +235,11 @@ fn failed_text(failed: Failed) -> String {
             .to_owned(),
         Failed::Canceled => "canceled".to_owned(),
         Failed::Nodes { failed, total } => format!("{failed} of {total} nodes failed to update"),
+        Failed::Incompatible(core) => crate::text::incompatible_text(
+            core.version,
+            wartui_proto::link::BRIDGE_VERSION,
+            core.standing,
+        ),
     }
 }
 

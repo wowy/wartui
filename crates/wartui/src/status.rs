@@ -38,8 +38,8 @@ use wartui_proto::bus::{MAX_SLOTS, NodeBoard, Slot};
 use wartui_proto::fan::FanStats;
 use wartui_proto::fleet::{Report, ScanMode};
 use wartui_proto::link::{
-    BluetoothStatus, BridgeHealth, Central, HOST_SILENCE_SECS, HostOwner, PairWindow, QueueStat,
-    QueueStats, RadioInfo, RadioLinkStats,
+    BRIDGE_VERSION, BluetoothStatus, BridgeHealth, Central, HOST_SILENCE_SECS, HostOwner,
+    PairWindow, QueueStat, QueueStats, RadioInfo, RadioLinkStats, Standing,
 };
 use wartui_proto::mac;
 use wartui_proto::plan::PlanSettings;
@@ -90,6 +90,12 @@ pub async fn run(args: Args) -> Result<()> {
         bail!("{}", super::no_bridge_notice(args.bridge.as_deref(), over).await)
     };
     println!("bridge     {}, firmware {}", mac::full(&info.mac), info.fw_version);
+    if let Standing::Fewer { older } = info.standing() {
+        println!(
+            "note       {}",
+            crate::text::minor_apart_text(info.version, BRIDGE_VERSION, older)
+        );
+    }
     println!("board      {}", board_line(info.node_board));
     println!("{}", super::last_reset_line(&info));
     // A split bridge's radio restarts on its own, and this is where its reason shows.
@@ -417,33 +423,22 @@ pub(crate) async fn wait_for_ready(
 ) -> Result<Option<BridgeInfo>> {
     match wait_for_ready_or_why(link, over, within).await.ready {
         Ok(info) => Ok(info),
-        Err(reason) => bail!("{reason}"),
+        Err(why) => bail!("{}", not_ready_text(why)),
     }
 }
 
-/// What [`wait_for_ready_or_why`] came to.
-#[derive(Debug)]
-pub(crate) struct ReadyWaited {
-    /// The announcement, `None` when the wait ran out with no failure to name, or why the link
-    /// went down first.
-    pub(crate) ready: Result<Option<BridgeInfo>, String>,
-    /// A frame arrived that did not decode.
-    pub(crate) garbled: bool,
-}
-
-/// [`wait_for_ready`], keeping the reason as text and noting whether a frame arrived that did not
-/// decode: a bridge running firmware from another tree. Each pairing notice goes to standard error
-/// as it comes.
+/// [`wait_for_ready`], keeping why it ended and whether a frame arrived that failed the frame
+/// check: a bridge running firmware from before the frozen core. Each pairing notice goes to
+/// standard error as it comes.
 pub(crate) async fn wait_for_ready_or_why(
     link: &mut LinkHandle,
     over: crate::config::Link,
     within: Duration,
-) -> ReadyWaited {
+) -> ops::ReadyWaited {
     let mut notice = |notice: ReadyNotice| match notice {
         ReadyNotice::Pairing(text) | ReadyNotice::Through(text) => eprintln!("{text}"),
     };
-    let waited = ops::ready(link, over, within, crate::CONNECT_NOTICE_AFTER, &mut notice).await;
-    ReadyWaited { ready: waited.ready.map_err(not_ready_text), garbled: waited.garbled }
+    ops::ready(link, over, within, crate::CONNECT_NOTICE_AFTER, &mut notice).await
 }
 
 /// Why a wait that announced the OS's pairing dialog ran out, when no failure is retried.
@@ -461,8 +456,11 @@ fn ready_ran_out() -> String {
 }
 
 /// Why the bridge did not announce itself, as every command says it.
-fn not_ready_text(why: NotReady) -> String {
+pub(crate) fn not_ready_text(why: NotReady) -> String {
     match why {
+        NotReady::Incompatible(core) => {
+            crate::text::incompatible_text(core.version, BRIDGE_VERSION, core.standing)
+        }
         NotReady::Down(reason) | NotReady::Retried(reason) => reason,
         NotReady::Closed => "the link closed".to_owned(),
         NotReady::SilentAfterPairing => ready_ran_out(),
@@ -490,6 +488,10 @@ pub(crate) fn link_error(error: LinkError, no_answer: &str) -> anyhow::Error {
         }
         LinkError::NoAnswer(_) => anyhow::Error::new(error).context(no_answer.to_owned()),
         LinkError::Down(_) | LinkError::Closed => anyhow::Error::new(error),
+        LinkError::Incompatible(core) => anyhow::anyhow!(
+            "{}",
+            crate::text::incompatible_text(core.version, BRIDGE_VERSION, core.standing)
+        ),
     }
 }
 

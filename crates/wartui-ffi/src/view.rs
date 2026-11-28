@@ -2,8 +2,8 @@
 //!
 //! Each type here is a remote declaration of the app's own, field for field and variant for
 //! variant, so the phone sees the app's shape: nothing renamed, reordered or flattened. A field or
-//! variant added on one side only fails to compile. The ten plain enums the view uses from the
-//! crates below are declared here too.
+//! variant added on one side only fails to compile. The twelve plain enums and the firmware
+//! [`Version`] the view uses from the crates below are declared here too.
 //!
 //! The view words nothing: a `String` is a datum (an address, a label, a port) or the transport's
 //! own account of a failure. The phone words the rest.
@@ -17,8 +17,8 @@ use wartui_app::view::{
 };
 use wartui_core::nmea::Constellation;
 use wartui_core::position::PositionSource;
-use wartui_proto::bus::Board;
-use wartui_proto::link::{PowerOutcome, SdFormatOutcome, SdLogState, SdState};
+use wartui_proto::bus::{Board, Version};
+use wartui_proto::link::{End, PowerOutcome, SdFormatOutcome, SdLogState, SdState, Standing};
 use wartui_proto::plan::{ChannelPool, Planner};
 use wartui_proto::reset::ResetCause;
 
@@ -63,6 +63,37 @@ pub enum Board {
     Esp32p4,
     /// A byte this build does not name.
     Unknown(u8),
+}
+
+/// A firmware's version.
+#[uniffi::remote(Record)]
+pub struct Version {
+    pub major: u8,
+    pub minor: u8,
+    pub patch: u8,
+}
+
+/// One end of the host link.
+#[uniffi::remote(Enum)]
+pub enum End {
+    /// The bridge.
+    Bridge,
+    /// This host.
+    Host,
+}
+
+/// How a bridge's version stands against this host's, by semantic versioning.
+#[uniffi::remote(Enum)]
+pub enum Standing {
+    /// The same major and minor: every message reads.
+    Same,
+    /// Another minor: every message both know reads, and `older` lacks the other's newer ones.
+    Fewer { older: End },
+    /// Another major: the two share the frozen core only.
+    Apart { older: End },
+    /// The same major, and an announcement that did not read: another build of it. The two share
+    /// the frozen core only.
+    OtherBuild,
 }
 
 /// Which kind of position tier placed the rows.
@@ -445,11 +476,17 @@ pub enum Note {
     /// The subscription is through and the bridge has not answered. `notice` is the
     /// transport's.
     WaitingOnReady { notice: String },
+    /// The bridge runs another minor than this library's: every message both know works, and the
+    /// `older` end lacks what the other's minor added until it is updated.
+    BridgeMinorApart { bridge: Version, host: Version, older: End },
 }
 
 /// Something wrong with the capture, the bridge, the receiver or a node.
 #[uniffi::remote(Enum)]
 pub enum Fault {
+    /// The bridge is reached and shares only the frozen core with this library: another major,
+    /// or another build of this one. No capture runs over it; `updateBridge` is the fix.
+    BridgeIncompatible { bridge: Version, host: Version, standing: Standing },
     /// The link is down.
     LinkDown(LinkFault),
     /// The store fell behind and dropped rows.

@@ -7,11 +7,20 @@
 //!
 //! Counts a healthy capture also produces, such as refused sightings and duplicate batches, are
 //! not faults either, so a clean run has none.
+//!
+//! **A bridge's version is read by semantic versioning** (`wartui_proto::link` `//!`). One on
+//! another major, or another build of this major, shares only the frozen core with this host: it
+//! is reached and cannot be captured over, so [`Fault::BridgeIncompatible`] stands first, in place
+//! of a link fault, while it is reached. One on another minor is captured over, and one end lacks
+//! the messages the other's minor added, so it is a note ([`Note::BridgeMinorApart`]). No message
+//! has been added since 0.1, so nothing the capture does is gated by the bridge's minor yet.
 
 use wartui_bridge::DisconnectCause;
 use wartui_core::engine::Snapshot;
 use wartui_core::gps::{GpsStatus, GpsView};
+use wartui_proto::bus::Version;
 use wartui_proto::fan::FanDuty;
+use wartui_proto::link::{BRIDGE_VERSION, End, Standing};
 use wartui_proto::plan::{ChannelPool, SCAN_CHANNELS};
 use wartui_proto::reset::ResetCause;
 
@@ -43,12 +52,33 @@ pub enum Note {
         /// The transport's notice.
         notice: String,
     },
+    /// The bridge runs another minor than this host's: every message both know works, and the
+    /// `older` end lacks what the other's minor added until it is updated.
+    BridgeMinorApart {
+        /// The bridge firmware's version.
+        bridge: Version,
+        /// The bridge firmware this host builds (`BRIDGE_VERSION`).
+        host: Version,
+        /// The end on the lower minor.
+        older: End,
+    },
 }
 
 /// Something wrong with the capture, the bridge, the receiver or a node. [`View::faults`] lists
 /// every one so far, most urgent first, and is empty on a clean run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
+    /// The bridge is reached and shares only the frozen core with this host: `standing` is
+    /// another major, or another build of this one. First, in place of [`Self::LinkDown`]: no
+    /// capture runs over it, and an update is the fix.
+    BridgeIncompatible {
+        /// The bridge firmware's version.
+        bridge: Version,
+        /// The bridge firmware this host builds (`BRIDGE_VERSION`).
+        host: Version,
+        /// How the two stand: [`Standing::Apart`] or [`Standing::OtherBuild`].
+        standing: Standing,
+    },
     /// The link is down. First, because with the link down nothing else updates.
     LinkDown(LinkFault),
     /// The store fell behind and dropped rows.
@@ -180,6 +210,12 @@ pub(super) fn of(snapshot: &Snapshot, nodes: &[NodeRow]) -> (Vec<Note>, Vec<Faul
         notes.push(Note::BufferFull { wifi: c.wifi_refused, bluetooth: c.ble_refused });
     }
     link(snapshot, &mut notes, &mut faults);
+    if snapshot.link_up
+        && let Some(bridge) = &snapshot.bridge
+        && let Standing::Fewer { older } = bridge.standing()
+    {
+        notes.push(Note::BridgeMinorApart { bridge: bridge.version, host: BRIDGE_VERSION, older });
+    }
     if snapshot.store.dropped > 0 {
         faults.push(Fault::StoreDropped { rows: snapshot.store.dropped });
     }
@@ -237,10 +273,16 @@ pub(super) fn of(snapshot: &Snapshot, nodes: &[NodeRow]) -> (Vec<Note>, Vec<Faul
     (notes, faults)
 }
 
-/// The link's part: a note or a fault, only with the link down. Every cause is matched, so a cause
-/// the transport adds is decided here before it builds.
+/// The link's part: a note or a fault, only with the link down, and an incompatible bridge in
+/// place of either. Every cause is matched, so a cause the transport adds is decided here before
+/// it builds.
 fn link(snapshot: &Snapshot, notes: &mut Vec<Note>, faults: &mut Vec<Fault>) {
     if snapshot.link_up {
+        return;
+    }
+    if let Some(core) = &snapshot.incompatible {
+        let (bridge, host, standing) = (core.version, BRIDGE_VERSION, core.standing);
+        faults.push(Fault::BridgeIncompatible { bridge, host, standing });
         return;
     }
     let reason = snapshot.link_error.clone();

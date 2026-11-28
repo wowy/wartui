@@ -9,7 +9,7 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use wartui_proto::bus::NodeBoard;
+use wartui_proto::bus::{NodeBoard, Version};
 use wartui_proto::link::{
     BRIDGE_VERSION, BridgeToHost, FrameAccumulator, HostToBridge, LoopPhase, MAX_FRAME, Ready,
     ReadyCore, ReadyRest, ShortStr, Trial, decode_host_frame, encode_frame,
@@ -33,6 +33,9 @@ const GARBAGE_CHUNKS: usize = 8;
 pub(super) enum Behavior {
     /// A bridge at `mac`, answering each `Identify` with a `Ready` after the first `ignore`.
     Bridge { mac: Mac, ignore: u32 },
+    /// A bridge at `mac` one major past this host's, answering each `Identify` with a `Ready`
+    /// whose rest the host does not read.
+    OtherMajor { mac: Mac },
     /// Reads nothing back, ever.
     Silent,
     /// Talks constantly, and none of it decodes.
@@ -235,13 +238,18 @@ impl Write for Pipe {
             else {
                 continue;
             };
-            if let (HostToBridge::Identify, Behavior::Bridge { mac, ignore }) =
-                (&cmd, &board.behavior)
-            {
-                board.identifies += 1;
-                if board.identifies > *ignore {
-                    line.inbound.extend(ready(*mac, board.booted));
+            match (&cmd, &board.behavior) {
+                (HostToBridge::Identify, Behavior::Bridge { mac, ignore }) => {
+                    board.identifies += 1;
+                    if board.identifies > *ignore {
+                        line.inbound.extend(ready(*mac, BRIDGE_VERSION, board.booted));
+                    }
                 }
+                (HostToBridge::Identify, Behavior::OtherMajor { mac }) => {
+                    let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+                    line.inbound.extend(ready(*mac, version, board.booted));
+                }
+                _ => {}
             }
             board.decoded.push(cmd);
         }
@@ -268,14 +276,14 @@ impl Abort for Pipe {
     fn clear_output(&mut self) {}
 }
 
-/// A `Ready` from a bridge at `mac` that booted at `booted`. Its uptime advances with real time,
-/// so the answers to two `Identify`s read as one life.
-fn ready(mac: Mac, booted: Instant) -> Vec<u8> {
+/// A `Ready` from a bridge on `version` at `mac` that booted at `booted`. Its uptime advances with
+/// real time, so the answers to two `Identify`s read as one life.
+fn ready(mac: Mac, version: Version, booted: Instant) -> Vec<u8> {
     let msg = BridgeToHost::Ready(Ready {
         core: ReadyCore {
             mac,
             image: [0; 32],
-            version: BRIDGE_VERSION,
+            version,
             trial: Trial::Settled,
             uptime_ms: u32::try_from(booted.elapsed().as_millis()).unwrap_or(u32::MAX),
         },

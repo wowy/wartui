@@ -37,6 +37,8 @@ use wartui_bridge::ble::BleTransport;
 use wartui_bridge::sim::{SimConfig, SimTransport};
 use wartui_bridge::spec::BridgeSpec;
 use wartui_bridge::{BridgeInfo, LinkHandle};
+use wartui_proto::bus::Version;
+use wartui_proto::link::{BRIDGE_VERSION, Standing};
 use wartui_proto::mac::Mac;
 
 use crate::log::SinkError;
@@ -83,7 +85,8 @@ pub trait ReadyListener: Send + Sync {
 pub struct Announced {
     /// The bridge, as a capture's view shows it.
     pub bridge: BridgeView,
-    /// A frame arrived that did not decode: a bridge running firmware from another tree.
+    /// A frame arrived that failed the frame check: a bridge running firmware from before the
+    /// frozen core.
     pub garbled: bool,
 }
 
@@ -103,10 +106,16 @@ pub enum ReadyError {
     /// The wait ran out after the OS's pairing dialog was announced.
     #[error("the pairing wait ran out")]
     PairingRanOut,
-    /// The wait ran out with nothing to name. `garbled`: a frame arrived that did not decode, a
-    /// bridge running firmware from another tree.
+    /// The wait ran out with nothing to name. `garbled`: a frame arrived that failed the frame
+    /// check, a bridge running firmware from before the frozen core, which only a wired flash
+    /// updates.
     #[error("no bridge answered")]
     Silent { garbled: bool },
+    /// The bridge answered, and shares only the frozen core with this library: `bridge` is its
+    /// firmware, `host` the one this library builds, and `standing` another major or another
+    /// build. No capture runs over it; `updateBridge` updates it.
+    #[error("the bridge {bridge:?} shares only the frozen core with this library")]
+    Incompatible { bridge: Version, host: Version, standing: Standing },
     /// A session or another wait holds the link.
     #[error("the link is in use")]
     InUse,
@@ -123,6 +132,11 @@ impl From<NotReady> for ReadyError {
             NotReady::Retried(detail) => Self::Retried { detail },
             NotReady::SilentAfterPairing => Self::SilentAfterPairing,
             NotReady::PairingRanOut => Self::PairingRanOut,
+            NotReady::Incompatible(core) => Self::Incompatible {
+                bridge: core.version,
+                host: BRIDGE_VERSION,
+                standing: core.standing,
+            },
         }
     }
 }
