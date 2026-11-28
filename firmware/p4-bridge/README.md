@@ -129,10 +129,14 @@ writes `partitions.csv` and erases `otadata`, so the P4 boots the image just wri
 `ota_0` and `ota_1`, and a `trial` sector at 0xFF0000. An update writes only the spare slot,
 `otadata` and `trial`, so every later image runs on the table of the board's last wired flash
 (`crates/wartui-proto/src/link/mod.rs` `//!`). The table ends at 0xFF1000 and needs a 16 MB flash;
-Waveshare lists the board's as 32 MB, and the top half stays unassigned. espflash writes the size
-it detects into the bootloader's header, and refuses this table on a board it reads as smaller.
-`espflash save-image` reads no board and assumes 4 MB, so the release's images and the one
-`flash-bridge` builds pass `--flash-size 16mb`.
+the board's is 32 MB, by Waveshare's listing and `espflash board-info`, and the top half stays
+unassigned.
+
+The runner, the release's images and the image `flash-bridge` builds all pass `--flash-size 16mb`.
+espflash writes the size into the app image's header, which the image's digest covers, so a board
+flashed by wire reports the digest `flash-bridge` builds from the same source, and `flash-bridge`
+leaves it alone. Left to itself, `espflash flash` writes the 32 MB it detects, and
+`espflash save-image` reads no board and assumes 4 MB, which this table does not fit.
 
 espflash resets the board through the CH343 and reboots it into the new image, so run
 `cargo run --release -- --port <that port>` with no button held. The CH343P's DTR and RTS drive
