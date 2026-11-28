@@ -626,6 +626,9 @@ confirms the new image; a second ctrl-c exits at once. The board prints, by its 
 | `stopping; ending the bridge's update session`     | A ctrl-c while sending; the run ends                     |
 | `installing, so the update runs to its outcome; …` | A ctrl-c after the install; a second one exits           |
 
+The P4 stops its scan as it takes the image, over either link. A run that fails leaves the scan
+stopped: `wartui run` or `wartui scan start` starts it again.
+
 The run fails, and the P4 keeps the image it ran, when:
 
 - The P4 came back on its old image: the new one did not boot, and its trial watchdog rolled it
