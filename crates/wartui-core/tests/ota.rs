@@ -20,7 +20,8 @@ use wartui_proto::bus::{
     Slot, UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType, UpdateState, UpdateStatus, Vdd, Version,
 };
 use wartui_proto::link::{
-    BridgeToHost, HostToBridge, UPDATE_STATUS_MAX, UpdateStatusBytes, cache_chunk_body, image_tag,
+    BridgeToHost, FromNodeBody, HostToBridge, UPDATE_STATUS_MAX, UpdateStatusBytes,
+    cache_chunk_body, image_tag,
 };
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
@@ -1265,34 +1266,85 @@ async fn drive_fleet_fails_upload_when_link_stops_taking_commands() {
 /// Every op the scripted cache took, by its code, and whether each `Abort` was answered `Idle`.
 type CacheLog = Arc<Mutex<Vec<(u8, Option<UpdateState>)>>>;
 
-/// A P4 at the bridge's end of the link that takes the node image upload into a cache of
-/// `sectors` sectors as its receiver does, `per_command` per command, and counts every other
-/// command done unanswered.
-fn scripted_cache(mut plumbing: LinkPlumbing, sectors: usize, per_command: Duration) -> CacheLog {
+/// How the scripted cache behaves.
+#[derive(Debug, Clone, Copy)]
+struct CacheScript {
+    /// The cache's size, in sectors.
+    sectors: usize,
+    /// How long each command takes.
+    per_command: Duration,
+    /// Takes no command after this many, as a link that stopped writing.
+    stalls_after: Option<usize>,
+    /// The node heartbeats at once, and refuses its update's `begin` with `FlashError`.
+    refusing_node: bool,
+}
+
+impl CacheScript {
+    /// A cache of `sectors` sectors, 10 ms a command, behind a node that never heartbeats.
+    const fn of(sectors: usize) -> Self {
+        Self {
+            sectors,
+            per_command: Duration::from_millis(10),
+            stalls_after: None,
+            refusing_node: false,
+        }
+    }
+}
+
+/// A P4 at the bridge's end of the link that takes the node image upload into its cache as its
+/// receiver does, as `script` says, and counts every other command done.
+fn scripted_cache(mut plumbing: LinkPlumbing, script: CacheScript) -> CacheLog {
     let log = CacheLog::default();
     let taken = Arc::clone(&log);
     tokio::spawn(async move {
         let mut receiver = Box::new(Receiver::new(BOARD));
-        let mut cache = Cache(vec![0xFF; sectors * SECTOR]);
+        let mut cache = Cache(vec![0xFF; script.sectors * SECTOR]);
+        if script.refusing_node {
+            let body = FromNodeBody::from_slice(&heartbeat(OLD, false)).unwrap();
+            let kind = UpType::Heartbeat.as_u8();
+            let beat = BridgeToHost::FromNode { slot: SLOT, rx_us: 1, kind, body };
+            if plumbing.events.send(LinkEvent::Message(beat)).await.is_err() {
+                return;
+            }
+        }
+        let mut handled = 0;
         while let Some(cmd) = plumbing.commands.recv().await {
-            tokio::time::sleep(per_command).await;
+            if script.stalls_after.is_some_and(|after| handled >= after) {
+                std::future::pending::<()>().await;
+            }
+            handled += 1;
+            tokio::time::sleep(script.per_command).await;
             plumbing.commands.done(1);
-            let HostToBridge::CacheImage(bytes) = cmd else { continue };
-            let op = update::Op::decode(&bytes).expect("an op");
-            let code = bytes[0];
-            let status = match update::receive(&mut receiver, op, Some(&mut cache), false) {
-                update::Received::Status(status) => status,
-                update::Received::Install(_) => None,
-            };
-            taken.lock().unwrap().push((code, status.map(|status| status.state)));
-            if let Some(status) = status {
-                let mut buf = [0u8; UPDATE_STATUS_MAX];
-                let len = update::Op::Status(status).encode(&mut buf);
-                let up =
-                    BridgeToHost::CacheImage(UpdateStatusBytes::from_slice(&buf[..len]).unwrap());
-                if plumbing.events.send(LinkEvent::Message(up)).await.is_err() {
-                    return;
+            let up = match cmd {
+                HostToBridge::CacheImage(bytes) => {
+                    let op = update::Op::decode(&bytes).expect("an op");
+                    let code = bytes[0];
+                    let status = match update::receive(&mut receiver, op, Some(&mut cache), false) {
+                        update::Received::Status(status) => status,
+                        update::Received::Install(_) => None,
+                    };
+                    taken.lock().unwrap().push((code, status.map(|status| status.state)));
+                    let Some(status) = status else { continue };
+                    let mut buf = [0u8; UPDATE_STATUS_MAX];
+                    let len = update::Op::Status(status).encode(&mut buf);
+                    BridgeToHost::CacheImage(UpdateStatusBytes::from_slice(&buf[..len]).unwrap())
                 }
+                HostToBridge::ToNode { slot, kind, body, .. }
+                    if script.refusing_node && kind == DownType::UpdateBegin.as_u8() =>
+                {
+                    let Ok(DownMsg::UpdateBegin(begin)) = DownMsg::decode(kind, &body) else {
+                        continue;
+                    };
+                    let state = UpdateState::FlashError;
+                    let refused = UpdateStatus { session: begin.session, state, next_offset: 0 };
+                    let body = FromNodeBody::from_slice(&refused.encode()).unwrap();
+                    let kind = UpType::UpdateStatus.as_u8();
+                    BridgeToHost::FromNode { slot, rx_us: 2, kind, body }
+                }
+                _ => continue,
+            };
+            if plumbing.events.send(LinkEvent::Message(up)).await.is_err() {
+                return;
             }
         }
     });
@@ -1328,11 +1380,11 @@ const ABORT: u8 = 6;
 /// Drive one node's update against [`scripted_cache`] until `stop`, and what the cache took,
 /// with whether the upload was verified.
 async fn drive_against_cache(
-    sectors: usize,
+    script: CacheScript,
     stop: impl std::future::Future<Output = ()>,
 ) -> (Result<Vec<Outcome>, FleetError>, CacheLog, bool) {
     let (mut link, plumbing) = link_pair();
-    let log = scripted_cache(plumbing, sectors, Duration::from_millis(10));
+    let log = scripted_cache(plumbing, script);
     let image = image(NEW);
     let mut sessions = [OtaSession::new(NODE, OLD, &image, SESSION, Ids::of(0, 1), now())];
     let mut cached = false;
@@ -1352,7 +1404,7 @@ fn aborts(log: &CacheLog) -> Vec<Option<UpdateState>> {
 async fn drive_fleet_sends_cache_abort_when_stopped_mid_upload() {
     // Each op takes 10 ms, so the upload is a sector or so in at the stop.
     let stop = tokio::time::sleep(Duration::from_millis(100));
-    let (ended, log, cached) = drive_against_cache(64, stop).await;
+    let (ended, log, cached) = drive_against_cache(CacheScript::of(64), stop).await;
     assert_eq!(ended, Ok(vec![Outcome::Failed(Failure::Canceled)]));
     assert!(!cached, "stopped before the cache verified the image");
     assert_eq!(aborts(&log), [Some(UpdateState::Idle)], "one abort, answered");
@@ -1361,7 +1413,8 @@ async fn drive_fleet_sends_cache_abort_when_stopped_mid_upload() {
 #[tokio::test(start_paused = true)]
 async fn drive_fleet_sends_cache_abort_when_upload_fails() {
     // A cache too small for the image refuses its `Begin`.
-    let (ended, log, cached) = drive_against_cache(1, std::future::pending()).await;
+    let (ended, log, cached) =
+        drive_against_cache(CacheScript::of(1), std::future::pending()).await;
     assert!(matches!(ended, Err(FleetError::Upload(update::Failure::Refused(_)))), "{ended:?}");
     assert!(!cached);
     assert_eq!(aborts(&log), [Some(UpdateState::Idle)]);
@@ -1371,9 +1424,36 @@ async fn drive_fleet_sends_cache_abort_when_upload_fails() {
 async fn drive_fleet_sends_no_abort_when_stopped_after_cache_verified() {
     // The node never heartbeats, so its session waits until the stop.
     let stop = tokio::time::sleep(Duration::from_secs(5));
-    let (_, log, cached) = drive_against_cache(64, stop).await;
+    let (_, log, cached) = drive_against_cache(CacheScript::of(64), stop).await;
     assert!(cached, "the cache verified the image before the stop");
     assert!(aborts(&log).is_empty(), "the nodes are fed from the verified image");
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_fleet_sends_cache_abort_when_sessions_end_before_cache_is_verified() {
+    // The node refuses its `begin` while the upload is a few ops in, at 100 ms an op.
+    let script = CacheScript {
+        per_command: Duration::from_millis(100),
+        refusing_node: true,
+        ..CacheScript::of(64)
+    };
+    let (ended, log, cached) = drive_against_cache(script, std::future::pending()).await;
+    assert_eq!(ended, Ok(vec![Outcome::Failed(Failure::Refused)]));
+    assert!(!cached, "the session ended before the cache verified the image");
+    assert_eq!(aborts(&log), [Some(UpdateState::Idle)], "one abort, answered");
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_fleet_sends_no_abort_when_upload_stalled_on_the_link() {
+    // The link takes the `Begin` and nothing after, so the upload fails on its stall. An `Abort`
+    // would wait behind it for the whole write bound before the failure was heard.
+    let script = CacheScript { stalls_after: Some(1), ..CacheScript::of(64) };
+    let start = tokio::time::Instant::now();
+    let (ended, log, _) = drive_against_cache(script, std::future::pending()).await;
+    assert_eq!(ended, Err(FleetError::Upload(update::Failure::Silent)));
+    assert!(aborts(&log).is_empty());
+    // The stall bound and the sender's tries, with no write bound for an `Abort` after them.
+    assert!(start.elapsed() < Duration::from_secs(15), "failed after {:?}", start.elapsed());
 }
 
 #[test]

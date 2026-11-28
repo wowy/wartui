@@ -27,8 +27,9 @@
 //! **A session the host gives up on is ended with `Abort`** ([`abort`]), shared by the bridge's
 //! own update and the node image upload. The bridge answers it with `Idle`, and that wait is
 //! timed from the write too, so an `Abort` queued behind a slow Bluetooth write still counts as
-//! answered. A bridge that does not answer is no error: its session ends anyway when the host
-//! goes or the next `Begin` replaces it.
+//! answered. A link that goes down ends the wait at once, since nothing more is written. A bridge
+//! that does not answer is no error: its session ends anyway when the host goes or the next
+//! `Begin` replaces it.
 //!
 //! [`REPLY_WAIT_MS`]: wartui_proto::radio_link::update::REPLY_WAIT_MS
 
@@ -174,8 +175,8 @@ pub fn status_in(bytes: &[u8]) -> Option<UpdateStatus> {
 
 /// End `session` with an `Abort`, which `wrap` makes a command, and wait for the bridge's `Idle`
 /// for it, which `status` reads out of a message. The wait is [`REPLY_WAIT_MS`] from the link
-/// writing the op, and at most [`STALL_MS`] for the write. Every other event that arrives
-/// meanwhile is dropped: the caller is stopping.
+/// writing the op, and at most [`STALL_MS`] for the write; a `Disconnected` ends it at once. Every
+/// other event that arrives meanwhile is dropped: the caller is stopping.
 ///
 /// Returns whether the `Idle` arrived. A bridge that does not answer is not an error.
 pub async fn abort(
@@ -212,8 +213,9 @@ pub async fn abort(
                         return true;
                     }
                 }
+                // Nothing more is written, and the bridge drops the session with its host.
+                Some(LinkEvent::Disconnected { .. }) | None => return false,
                 Some(_) => {}
-                None => return false,
             },
         }
     }
@@ -561,6 +563,23 @@ mod tests {
         let (answered, took, _) = abort_over(per_command, Fate::Write).await;
         assert!(answered);
         assert!(took > Duration::from_millis(REPLY_WAIT_MS), "{took:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pace_abort_returns_false_when_link_goes_down() {
+        // The transport holds the op unwritten, as one between connections does.
+        let (mut link, mut plumbing) = link_pair();
+        tokio::spawn(async move {
+            let _held = plumbing.commands.recv().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let reason = "the bridge disconnected".to_owned();
+            let gone = LinkEvent::Disconnected { reason, cause: crate::DisconnectCause::Other };
+            let _ = plumbing.events.send(gone).await;
+            std::future::pending::<()>().await;
+        });
+        let start = Instant::now();
+        assert!(!abort(&mut link, 7, HostToBridge::Update, update_status).await);
+        assert_eq!(start.elapsed(), Duration::from_millis(100), "at the drop");
     }
 
     #[tokio::test(start_paused = true)]

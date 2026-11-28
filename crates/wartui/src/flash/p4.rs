@@ -7,13 +7,14 @@
 //! reads.
 //!
 //! **The link is opened and its `Ready` waited for here**, and over USB the bridge that answers
-//! must be the one the probe chose. The port is opened by path: the probe that chose it has
-//! already asked, and the reboot leaves the CH343 where it is. A ctrl-c while the link opens ends
-//! the command. One while the image is sent is the update's stop: it ends the bridge's update
-//! session, and the bridge keeps its image. From the install on the update runs to its outcome,
-//! since only the host's frames confirm the new image, and a second ctrl-c exits without it.
-//! `main` closes the link. The download or build before it blocks the task, so it runs with no
-//! ctrl-c handler, and a ctrl-c there ends the process.
+//! must be the one the probe chose. The port is opened by path: the probe that chose it has already
+//! asked, and the reboot leaves the CH343 where it is. A ctrl-c while the link opens ends the
+//! command. One while the image is sent is the update's stop: it ends the bridge's update session,
+//! and the bridge keeps its image; the command says so and exits as an interrupted one does. From
+//! the install on the update runs to its outcome, since only the host's frames confirm the new
+//! image, and a second ctrl-c exits without it. `main` closes the link. The download or build
+//! before it blocks the task, so it runs with no ctrl-c handler, and a ctrl-c there ends the
+//! process.
 //!
 //! A failed update over Bluetooth is recovered over USB, by running `flash-bridge` there.
 //!
@@ -193,8 +194,20 @@ async fn update_over_link(
             Ok(())
         }
         Ok(Updated::Installed) => Ok(()),
+        // A ctrl-c, which exits as any interrupted command does, once the line is out.
+        Err(Failed::Stopped) => {
+            line().note(&stopped_text(label));
+            Err(crate::Interrupted.into())
+        }
         Err(failed) => Err(failed_error(label, failed)),
     }
+}
+
+/// What a stop while the image was sent leaves, the bridge named `label`.
+fn stopped_text(label: &str) -> String {
+    format!(
+        "stopped before the install; {label} keeps its image, and flash-bridge can be run again"
+    )
 }
 
 /// Open the P4 bridge on `path` over its CH343 and wait for its `Ready`.
@@ -300,10 +313,7 @@ fn failed_error(label: &str, failed: Failed) -> anyhow::Error {
         Failed::PortStalled { percent } => anyhow!(port_stall_text(percent)),
         Failed::Sender { failure, image_known } => anyhow!(failure_text(failure, image_known)),
         Failed::Queue(error) => anyhow::Error::new(error).context("queueing an update op"),
-        Failed::Stopped => anyhow!(
-            "stopped before the install; {label} keeps its image, and flash-bridge can be run \
-             again"
-        ),
+        Failed::Stopped => anyhow!(stopped_text(label)),
         Failed::NoComeBack { over: Link::Usb, secs } => anyhow!(
             "the bridge did not come back within {secs} s of the install; check its CH343 log"
         ),
@@ -420,6 +430,15 @@ impl ProgressLine {
         }
         self.drawn = None;
         println!("{:<6} {text}", self.board);
+    }
+
+    /// A line of its own, below the progress, naming the bridge itself.
+    fn note(&mut self, text: &str) {
+        if self.tty && self.drawn.is_some() {
+            print!("\r\x1b[K");
+        }
+        self.drawn = None;
+        println!("{text}");
     }
 
     /// What the update said, as its line.
@@ -610,8 +629,11 @@ mod tests {
 
     #[test]
     fn flash_p4_says_image_kept_when_stopped_while_sending() {
-        let text = failed_error("71:F4", Failed::Stopped).to_string();
-        assert!(text.starts_with("stopped before the install; 71:F4 keeps its image"), "{text}");
+        let text = stopped_text("71:F4");
+        assert_eq!(
+            text,
+            "stopped before the install; 71:F4 keeps its image, and flash-bridge can be run again"
+        );
     }
 
     #[test]
