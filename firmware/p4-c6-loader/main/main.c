@@ -33,6 +33,9 @@ extern const uint8_t image_end[] asm("_binary_c6_loader_bin_end");
 #define LINK_RX 14
 #define LINK_TX 19
 #define VERDICT_S 120
+// How long to listen for a C6 loader already running when ESP-Hosted never answers. A C6 loader
+// that failed repeats its line every 5 s.
+#define LISTEN_S 25
 // How long to wait for ESP-Hosted's transport after `esp_hosted_connect_to_slave` returns.
 #define HOSTED_UP_MS 5000
 
@@ -123,25 +126,32 @@ static char *c6_text(const char *line) {
     return text;
 }
 
-// Relays the C6 loader's lines until its verdict, or until the deadline.
-static void relay(void) {
+// Relays the C6 loader's lines until its verdict, VERDICT_S from its first line. Returns false,
+// having said nothing, when no line arrives within `first_s`.
+static bool relay(int first_s) {
     line_reader_t reader = {0};
-    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(VERDICT_S * 1000);
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(first_s * 1000);
+    bool heard = false;
     const char *line;
     while ((line = read_line(&reader, deadline)) != NULL) {
         char *text = c6_text(line);
         if (text == NULL) continue;
+        if (!heard) {
+            heard = true;
+            deadline = xTaskGetTickCount() + pdMS_TO_TICKS(VERDICT_S * 1000);
+        }
         say("c6 %s", text);
         if (strncmp(text, "done", 4) == 0) {
             say("done");
-            return;
+            return true;
         }
         if (strncmp(text, "failed ", 7) == 0) {
             say("failed c6 loader: %s", text + 7);
-            return;
+            return true;
         }
     }
-    say("failed no verdict from the C6 loader in %d s", VERDICT_S);
+    if (heard) say("failed no verdict from the C6 loader in %d s", VERDICT_S);
+    return heard;
 }
 
 // `esp_hosted_connect_to_slave` returns ESP_OK whether or not the C6 answered; the transport's
@@ -240,7 +250,11 @@ void app_main(void) {
     EventBits_t bits = xEventGroupWaitBits(hosted_events, HOSTED_UP | HOSTED_FAILED, pdFALSE,
                                            pdFALSE, pdMS_TO_TICKS(HOSTED_UP_MS));
     if ((bits & HOSTED_UP) == 0 || (bits & HOSTED_FAILED) != 0) {
-        say("skipped no ESP-Hosted on the C6");
+        // A C6 loader from an earlier run may hold the C6, running or failed, and the setup must
+        // hear it rather than write the bridge over it. p4-radio sends no `c6-loader: ` line.
+        esp_hosted_deinit();
+        link_install();
+        if (!relay(LISTEN_S)) say("skipped no ESP-Hosted on the C6");
         idle();
     }
 
@@ -261,6 +275,6 @@ void app_main(void) {
     // Listening before the reset catches the C6 loader's first line.
     link_install();
     reset_c6();
-    relay();
+    if (!relay(VERDICT_S)) say("failed no verdict from the C6 loader in %d s", VERDICT_S);
     idle();
 }

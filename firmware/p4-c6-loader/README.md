@@ -11,8 +11,11 @@ It is C, not esp-hal, because ESP-Hosted's host side exists only as an ESP-IDF c
 
 1. Wait 2 s for a listener, then send `start`.
 2. Check the RTC guard (below).
-3. Connect to the C6, which resets it. ESP-Hosted's transport event says whether it answered;
-   with no `TRANSPORT_UP` within 5 s, or a `TRANSPORT_FAILURE`, send `skipped` and idle.
+3. Connect to the C6, which resets it. ESP-Hosted's transport event says whether it answered.
+   With no `TRANSPORT_UP` within 5 s, or a `TRANSPORT_FAILURE`, stop ESP-Hosted and listen on the
+   link UART for 25 s. A `c6-loader: ` line there is a C6 loader from an earlier run, running or
+   failed, and its lines are relayed to its verdict as in step 6. With none, send `skipped` and
+   idle.
 4. Ask for the C6's version, then push the embedded image with `ota_begin`, `ota_write` in
    1500-byte chunks and `ota_end`. `ota_activate` follows only on ESP-Hosted 2.6 or later; the
    factory C6 answers no version, so it goes without.
@@ -53,14 +56,15 @@ the C6 can be in:
 | The C6 runs | A rerun |
 | --- | --- |
 | ESP-Hosted | pushes the C6 loader again, as the first run did |
-| the C6 loader | resets it at whatever step it is in, then finds no ESP-Hosted and sends `skipped` |
-| p4-radio | resets it, finds no ESP-Hosted and sends `skipped`, having written nothing |
+| the C6 loader | resets it at whatever step it is in, finds no ESP-Hosted, and relays the C6 loader's lines to its verdict |
+| p4-radio | resets it, finds no ESP-Hosted, hears no C6 loader in 25 s and sends `skipped`, having written nothing |
 
 A rehearsal, and a C6 loader that refuses its plan, both select ESP-Hosted again, so a rerun
 after either starts over.
 
 A reset of a running C6 loader is a power cut at that step. Until its last step the factory
-table still selects the C6 loader, so the C6 boots it again and it starts over, unwatched. The
+table still selects the C6 loader, so the C6 boots it again and it starts over. Its lines from
+before ESP-Hosted stops are lost, and the rest are relayed. The
 [C6 loader's table](../c6-loader/README.md#order-of-writes) shows that only its bootloader and
 table writes need the header, and those take under a second.
 
@@ -91,6 +95,11 @@ write it at 0x0:
 ```sh
 espflash write-bin --port <P4 port> --chip esp32p4 0x0 build/wartui-p4-c6-loader-esp32p4.bin
 ```
+
+**On a C6 that runs ESP-Hosted, this write lands the C6 loader at once**: espflash resets the P4
+into the loader, which writes the C6 with nobody watching. Try it with a rehearsal build, or
+blank the P4 (`espflash erase-region --chip esp32p4 --port <P4 port> 0x0 0x10000`) and let
+`wartui flash-bridge` write and watch it.
 
 ## Dependency versions
 
