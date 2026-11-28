@@ -33,6 +33,7 @@ pub mod config;
 pub mod crc;
 pub mod dedup;
 pub mod fan;
+pub mod first_flash;
 pub mod fleet;
 pub mod frame_ring;
 pub mod hci;

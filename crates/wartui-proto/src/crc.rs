@@ -8,7 +8,14 @@
 /// and final XOR `0xFFFFFFFF`.
 #[must_use]
 pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
+    esp_rom_crc32_le(0, data)
+}
+
+/// `esp_rom_crc32_le(crc, data)`: [`crc32`]'s table, register `!crc` in, `!` out.
+/// The bootloader checks an `otadata` entry with `esp_rom_crc32_le(u32::MAX, &seq_le)`.
+#[must_use]
+pub fn esp_rom_crc32_le(crc: u32, data: &[u8]) -> u32 {
+    let mut crc = !crc;
     for &byte in data {
         crc = (crc >> 8) ^ TABLE[usize::from(crc as u8 ^ byte)];
     }
