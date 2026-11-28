@@ -322,8 +322,8 @@ impl Lines {
         Self { label, tenth: None }
     }
 
-    /// The line to print for `said`, if any: a verdict is printed by the setup, and the push's
-    /// progress once per tenth.
+    /// The line to print for `said`, if any: none for `Skipped` and `Failed`, which the setup
+    /// words, and the push's progress once per tenth.
     fn of(&mut self, said: &Said) -> Option<String> {
         let text = match said {
             Said::Start => "the loader is running".to_owned(),
@@ -349,6 +349,7 @@ impl Lines {
 /// Set up the blank P4 among the `silent` CH343s: the loader, its verdict, the bridge firmware
 /// and its C6's answer. `named` is whether `--bridge` named it, which keeps it unremembered.
 pub(super) async fn run(args: &Args, named: bool, silent: Vec<PortCandidate>) -> Result<()> {
+    refuse_image(args.image.as_deref())?;
     espflash_present()?;
     let judged = silent
         .into_iter()
@@ -421,13 +422,14 @@ pub(super) async fn run(args: &Args, named: bool, silent: Vec<PortCandidate>) ->
     match verdict {
         Ok(Verdict::Done) => {}
         Ok(Verdict::Skipped(why)) => {
-            println!("{path}  the C6 has no ESP-Hosted ({why}); writing the bridge firmware");
+            println!("{path}  the C6 loader was skipped: {why}; writing the bridge firmware");
         }
         Err(why) => bail!("{}", loader_failed_text(&path, &why)),
     }
     write(&path, &image)
         .map_err(|why| anyhow::anyhow!("writing the bridge firmware to {path} failed: {why}"))?;
 
+    println!("{path}  waiting for the bridge to answer with its C6's address");
     let Some(c6) = crate::interruptible(come_up(&label, &path, info.mac)).await? else {
         bail!("{}", c6_silent_text(&path));
     };
@@ -442,21 +444,40 @@ fn write(path: &str, image: &Path) -> Result<(), String> {
     if ran.ok { Ok(()) } else { Err(ran.last_line().to_owned()) }
 }
 
-/// Wait up to [`COME_UP`] for the bridge firmware on `path` to answer with an address other than
-/// its P4's, `own`: its C6's. `None` when it never does.
+/// Refuse `--image` in a setup: it is app-only, and the board needs a merged image at 0x0.
+fn refuse_image(image: Option<&Path>) -> Result<()> {
+    ensure!(
+        image.is_none(),
+        "--image is an app-only image, and a new board needs the bridge's merged image; drop \
+         --image, or use --firmware-dir"
+    );
+    Ok(())
+}
+
+/// Wait up to [`COME_UP`] in all for the bridge firmware on `path` to answer with an address
+/// other than its P4's, `own`: its C6's. `None` when it never does.
 async fn come_up(label: &str, path: &str, own: Mac) -> Result<Option<Mac>> {
-    let deadline = Instant::now() + COME_UP;
-    while Instant::now() < deadline {
-        // An open error is a P4 still starting; its own address is a C6 not answering yet.
-        if let Ok((link, core)) = p4::open_usb(label, path).await {
-            link.close().await;
-            if core.mac != own {
-                return Ok(Some(core.mac));
+    let deadline = tokio::time::Instant::now() + COME_UP;
+    loop {
+        // Each try ends at the deadline, whatever its own wait for a `Ready`.
+        let tried = tokio::time::timeout_at(deadline, p4::open_usb(label, path)).await;
+        match tried {
+            Err(_) => return Ok(None),
+            // Its own address is a C6 not answering yet.
+            Ok(Ok((link, core))) => {
+                link.close().await;
+                if core.mac != own {
+                    return Ok(Some(core.mac));
+                }
             }
+            // A P4 still starting.
+            Ok(Err(_)) => {}
+        }
+        if tokio::time::Instant::now() + COME_UP_RETRY >= deadline {
+            return Ok(None);
         }
         tokio::time::sleep(COME_UP_RETRY).await;
     }
-    Ok(None)
 }
 
 /// Build the P4 C6 loader in `dir` with its `build.sh`, which needs ESP-IDF exported.
@@ -737,6 +758,19 @@ mod tests {
             source(&P4_C6_LOADER, Some(Path::new("l.bin")), None, Some("v1")),
             Source::File("l.bin".into())
         );
+    }
+
+    #[test]
+    fn setup_refuses_image_when_setting_up_a_board() {
+        // An app-only image cannot be written at 0x0, and dropping it silently would set the
+        // board up from another source than the one named.
+        let refused = refuse_image(Some(Path::new("fw.bin"))).unwrap_err().to_string();
+        assert_eq!(
+            refused,
+            "--image is an app-only image, and a new board needs the bridge's merged image; \
+             drop --image, or use --firmware-dir"
+        );
+        assert!(refuse_image(None).is_ok());
     }
 
     #[test]

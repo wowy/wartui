@@ -566,7 +566,7 @@ wartui flash-bridge --link bluetooth --bridge 44:C0
 
 | Flag                    | Default         | What it is                                                              |
 |-------------------------|-----------------|-------------------------------------------------------------------------|
-| `--bridge PATH\|MAC`    | see below       | The P4 bridge to update, which must answer; `71:F4` works too           |
+| `--bridge PATH\|MAC`    | see below       | The P4 bridge to update; `71:F4` works too, and a silent path is set up |
 | `--link usb\|bluetooth` | `[bridge] link` | Which link carries the update; see "Over Bluetooth"                     |
 | `--config PATH`         | per-OS path     | Where to read and save the remembered bridge; see "Config file"         |
 | `--image BIN`           | —               | Send this app-only image rather than building or fetching one           |
@@ -613,8 +613,8 @@ neither, the run is refused. The setup clears the board's settings and Bluetooth
    bridge from then on, and is saved as a found board is.
 
 The loader comes from `--loader`, else a release's, else `firmware/p4-c6-loader/build.sh`, which
-needs ESP-IDF v5.5.4 exported. The bridge firmware comes from a release, else the checkout or
-`--firmware-dir`. A failed loader leaves it running on the P4, and running `flash-bridge` again
+needs ESP-IDF v5.5.4 exported. The bridge firmware comes from `--firmware-dir`, else a release's, else the checkout.
+`--image` is refused, since it is app-only. A failed loader leaves it running on the P4, and running `flash-bridge` again
 retries. A C6 that stays silent leaves nothing saved. Either way, the C6's header is the fallback,
 per `firmware/p4-bridge/README.md` § "First flash".
 

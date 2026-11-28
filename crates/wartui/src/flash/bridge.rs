@@ -49,7 +49,8 @@ use crate::{config, spec};
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     /// Which P4 bridge to flash, by path, by address or by the end of it (`71:F4`), which must
-    /// match one P4 bridge that answers. It is not remembered. Without it, the bridge remembered
+    /// match one P4 bridge that answers; a path whose CH343 is silent is offered for setup
+    /// instead. It is not remembered. Without it, the bridge remembered
     /// in `wartui.toml`, which must answer; else, with none remembered, the only P4 bridge that
     /// answers. A board found without it is remembered as the bridge once flashed.
     #[arg(long, value_name = "PATH|MAC")]
@@ -419,7 +420,9 @@ mod tests {
     }
 
     #[test]
-    fn flash_bridge_refuses_run_when_only_nodes_and_silent_ch343s_are_attached() {
+    fn flash_bridge_refuses_target_when_only_nodes_and_silent_ch343s_are_attached() {
+        // `target` alone refuses; `run` hands this refusal to the setup, which takes the silent
+        // CH343.
         let probed = [silent("/dev/ttyACM1")];
         let found = listed(&[board("/dev/ttyACM0", Some(&NODE_MAC))], &probed);
         let error = target(&found, &probed, None, None).unwrap_err().to_string();
