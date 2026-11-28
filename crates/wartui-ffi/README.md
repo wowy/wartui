@@ -105,8 +105,9 @@ the app is built against.
   `link.ready` refuses it with `ReadyError.Incompatible`, carrying both versions and how they
   stand (`Standing`: `Apart` names the older end, `OtherBuild` the same major read as another
   build); `Session.start` refuses it with `StartError.Incompatible` and creates no capture, and
-  `hearNodes` and `updateNodes` with `UpdateError.Incompatible`. `updateBridge` updates it, which
-  is the fix when the bridge is older; when the library is older, the app is. A bridge a minor
+  `hearNodes` and `updateNodes` with `UpdateError.Incompatible`. `updateBridge` updates it, after a
+  drop of the link too, which is the fix when the bridge is older; when the library is older, the
+  app is. A bridge a minor
   apart is captured over, and the view says so as a `Note.BridgeMinorApart`. A capture whose
   bridge turns incompatible under it shows `Fault.BridgeIncompatible` first, in place of a link
   fault.

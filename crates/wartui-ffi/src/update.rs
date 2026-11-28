@@ -54,6 +54,7 @@ use wartui_core::ota::{self, Failure, Outcome, Phase};
 use wartui_proto::bus::{Board, Capabilities, NodeBoard, Slot, UpdateState, Version};
 use wartui_proto::link::{BRIDGE_VERSION, Standing};
 use wartui_proto::mac::{self, Mac};
+use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::Failure as AppSenderFailure;
 
 use crate::link::{Inner, Link, LinkError};
@@ -1228,8 +1229,9 @@ impl Link {
 
     /// Send `image` to the bridge over this link, wait out its reboot, and read the outcome.
     /// Needs the bridge's `Ready`, which names the image it runs: an announcement from `ready`, or
-    /// the core of a bridge `ready` refused as incompatible, which this updates all the same. The
-    /// link keeps the latest `Ready` it reads, so after an install it names the new image.
+    /// the core of a bridge `ready` refused as incompatible, which this updates all the same, the
+    /// link dropped since or not. The link keeps the latest `Ready` it reads, so after an install
+    /// it names the new image.
     ///
     /// `stopper`, or a phone that stops awaiting, stops the update while the image is sent: it
     /// ends the partial image's session on the bridge with `Abort`, and the bridge keeps the image
@@ -1394,10 +1396,7 @@ async fn update_bridge(
         // `lend` refuses no bridge for what it runs.
         UpdateError::Closed | UpdateError::Incompatible { .. } => BridgeUpdateFailed::Closed,
     })?;
-    // A bridge this library reads only for its core announced nothing, and its core names the
-    // image all the same.
-    let reached = handle.reached().map(|core| core.image);
-    let Some(running) = handle.announced().map(|bridge| bridge.image).or(reached) else {
+    let Some(running) = running_image(&handle) else {
         inner.give_back(handle);
         return Err(BridgeUpdateFailed::NotAnnounced);
     };
@@ -1417,6 +1416,15 @@ async fn update_bridge(
     let updated = bridge::update(&mut handle, over, running, &image.image, stop, say).await;
     inner.give_back(handle);
     updated.map(BridgeUpdated::from).map_err(BridgeUpdateFailed::from)
+}
+
+/// The image the bridge on `link` runs, as its last `Ready` named it: its announcement, else the
+/// core of the bridge reached now, else that of the incompatible bridge the link heard before it
+/// dropped. A bridge this library reads only for its core announced nothing, and its core names
+/// the image all the same. `None` when the link has heard no `Ready` at all.
+fn running_image(link: &LinkHandle) -> Option<Option<[u8; DIGEST_LEN]>> {
+    let reached = link.reached().or(link.heard_incompatible()).map(|core| core.image);
+    link.announced().map(|bridge| bridge.image).or(reached)
 }
 
 /// Whether `progress` goes on to the phone's listener: a `Sending` only when its percent differs
@@ -1463,6 +1471,23 @@ mod tests {
 
     fn refused(core: BridgeCore) -> UpdateError {
         UpdateError::incompatible(core)
+    }
+
+    #[tokio::test]
+    async fn update_bridge_reads_running_image_when_link_dropped_after_incompatible_ready() {
+        // The drop clears what the link reaches, and the bridge is still the one it heard.
+        let image = [0x11; DIGEST_LEN];
+        let (mut link, plumbing) = link_pair();
+        assert_eq!(running_image(&link), None, "no `Ready` yet");
+        let core = BridgeCore { image: Some(image), ..other_major() };
+        plumbing.events.send(LinkEvent::Incompatible { core, fresh: true }).await.unwrap();
+        let reason = "the bridge disconnected".to_owned();
+        let down = LinkEvent::Disconnected { reason, cause: wartui_bridge::DisconnectCause::Other };
+        plumbing.events.send(down).await.unwrap();
+        link.recv().await.expect("the unread `Ready`");
+        link.recv().await.expect("the drop");
+        assert_eq!(link.reached(), None);
+        assert_eq!(running_image(&link), Some(Some(image)), "named by the core heard before");
     }
 
     #[tokio::test]
