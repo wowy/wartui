@@ -612,8 +612,9 @@ announcement is printed once. When the new image carries a new C6 image, the P4 
 C6, and the run prints that progress for up to 30 s. A P4 already running the image is left alone.
 
 A ctrl-c while the image is sent stops the run: it ends the update on the P4, which keeps its
-image. Once `installing` is printed the run goes on to the outcome, since only a host confirms the
-new image; a second ctrl-c exits at once. The board prints, by its last two octets:
+image, prints `stopped before the install; … keeps its image`, and exits 130, as an interrupted
+command does. Once `installing` is printed the run goes on to the outcome, since only a host
+confirms the new image; a second ctrl-c exits at once. The board prints, by its last two octets:
 
 | Line                                               | Meaning                                                  |
 |----------------------------------------------------|----------------------------------------------------------|
@@ -629,8 +630,6 @@ The run fails, and the P4 keeps the image it ran, when:
 
 - The P4 came back on its old image: the new one did not boot, and its trial watchdog rolled it
   back on its third boot.
-- A ctrl-c stopped the run before the install: `stopped before the install`. Run `flash-bridge`
-  again.
 - The link dropped mid-transfer, the P4 restarted into another image, or the P4 could not
   switch to the image it received. Run `flash-bridge` again. A restart of the C6 alone does not
   stop the transfer.

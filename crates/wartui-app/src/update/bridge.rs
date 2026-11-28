@@ -43,8 +43,9 @@
 //! garbage, which a held connection passes over.
 //!
 //! **Every `Identify` repeats the P4's announcement**: its faults, panics and the carrier's, the
-//! cache's and the fleet's lines. Each distinct line is said once per bridge life, and a new life
-//! says them again.
+//! cache's and the fleet's lines. So from `Install` on, when the polls start, each distinct line
+//! is said once per bridge life, and a new life says them again. Before it no poll runs, and every
+//! line is said.
 //!
 //! **Then the C6.** A new P4 image carries its C6's image, which the P4 sends the C6 at boot.
 //! Its progress arrives as error lines, handed on until the C6's new life, or until `QUIET`
@@ -146,7 +147,7 @@ pub enum Progress {
     RadioRestarted,
     /// The radio's update is still running when the wait for it ends.
     RadioStillUpdating,
-    /// A line the bridge sent meanwhile, once per bridge life.
+    /// A line the bridge sent meanwhile; from `Installing` on, once per bridge life.
     Line(Line),
 }
 
@@ -249,6 +250,8 @@ pub async fn update(
     let mut update = Update::new(image.bytes(), image.sha256(), &digest, running);
     update.send(link, stop, say).await?;
     say(Progress::Installing);
+    // From here the polls make the P4 repeat its announcement.
+    update.said.once_per_life();
     if bluetooth {
         update.settle_bluetooth(link, say).await?;
         return Ok(Updated::Installed);
@@ -375,6 +378,17 @@ impl<'a> Update<'a> {
         let mut tick = tokio::time::interval(TICK);
         let mut written = link.written();
         loop {
+            // A stop is taken up to the moment `Install` is handed to the link, so one that
+            // resolved beside the status that verified the image wins over the pump that would
+            // queue it.
+            let stopped = tokio::select! {
+                biased;
+                () = &mut stop => true,
+                () = std::future::ready(()) => false,
+            };
+            if stopped {
+                return Err(self.abort(link).await);
+            }
             self.pump(link)?;
             match self.sender.stage() {
                 Stage::Sending => say(Progress::Sending { percent: self.sender.percent() }),
@@ -387,13 +401,8 @@ impl<'a> Update<'a> {
                 Stage::Failed(failure) => return Err(self.failed(failure)),
             }
             tokio::select! {
-                () = &mut stop => {
-                    let session = self.sender.session();
-                    let ended = pace::abort(link, session, HostToBridge::Update, update_status);
-                    let ended = ended.await;
-                    tracing::debug!(session, ended, "bridge update aborted");
-                    return Err(Failed::Stopped);
-                }
+                biased;
+                () = &mut stop => return Err(self.abort(link).await),
                 _ = tick.tick() => {}
                 () = written.changed(), if self.sender.is_waiting() => {}
                 event = link.recv() => match event {
@@ -413,6 +422,15 @@ impl<'a> Update<'a> {
                 },
             }
         }
+    }
+
+    /// End the session the image is sent in, wait for the bridge's `Idle`, and say why the update
+    /// ended.
+    async fn abort(&mut self, link: &mut LinkHandle) -> Failed {
+        let session = self.sender.session();
+        let ended = pace::abort(link, session, HostToBridge::Update, update_status).await;
+        tracing::debug!(session, ended, "bridge update aborted");
+        Failed::Stopped
     }
 
     /// Wait out the reboot: `Install` again until the new life's `Ready`, with an `Identify`
@@ -647,25 +665,37 @@ fn update_status(message: &BridgeToHost) -> Option<UpdateStatus> {
     }
 }
 
-/// The bridge's lines said in its current life.
+/// The bridge's lines, and which of them its current life has said. Every line is said until
+/// [`Self::once_per_life`]: before `Install` no poll runs, so a line that arrives twice was sent
+/// twice.
 #[derive(Debug, Default)]
-struct Said(HashSet<Line>);
+struct Said {
+    /// Each line is said once per life.
+    once: bool,
+    /// The lines said in this life, once `once` is set.
+    lines: HashSet<Line>,
+}
 
 impl Said {
-    /// A new life repeats its lines, and they are said again.
-    fn new_life(&mut self) {
-        self.0.clear();
+    /// From now on the polls make the P4 repeat its announcement, so say each line once per life.
+    fn once_per_life(&mut self) {
+        self.once = true;
     }
 
-    /// Hand on a bridge's log or error line, unless this life has said it; anything else is not
-    /// a line.
+    /// A new life repeats its lines, and they are said again.
+    fn new_life(&mut self) {
+        self.lines.clear();
+    }
+
+    /// Hand on a bridge's log or error line, unless this life has said it since
+    /// [`Self::once_per_life`]; anything else is not a line.
     fn line(&mut self, message: &BridgeToHost, say: &mut (dyn FnMut(Progress) + Send)) {
         let line = match message {
             BridgeToHost::Error { message } => Line::Fault(message.to_string()),
             BridgeToHost::Log { message } => Line::Log(message.to_string()),
             _ => return,
         };
-        if self.0.insert(line.clone()) {
+        if !self.once || self.lines.insert(line.clone()) {
             say(Progress::Line(line));
         }
     }
@@ -876,7 +906,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use wartui_bridge::{BridgeInfo, DisconnectCause, LinkPlumbing, link_pair};
-    use wartui_proto::bus::{Board, NodeBoard};
+    use wartui_proto::bus::{Board, NodeBoard, UpdateState};
     use wartui_proto::link::{
         BRIDGE_VERSION, LogStr, LoopPhase, UPDATE_STATUS_MAX, UpdateStatusBytes,
     };
@@ -981,6 +1011,7 @@ mod tests {
     #[test]
     fn update_bridge_says_lines_again_when_a_new_life_repeats_them() {
         let mut said = Said::default();
+        said.once_per_life();
         let mut lines = Vec::new();
         let mut say = |progress| lines.push(progress);
         said.line(&error("no GPS receiver"), &mut say);
@@ -1245,6 +1276,10 @@ mod tests {
         closes: bool,
         /// How long each command takes.
         per_command: Duration,
+        /// Lines sent behind the status that answers `Begin`, while the image is sent.
+        sending_lines: Vec<BridgeToHost>,
+        /// Notified just before the status that says the image is verified goes up.
+        verified: Option<Arc<tokio::sync::Notify>>,
     }
 
     impl Script {
@@ -1258,6 +1293,8 @@ mod tests {
                 old_answers: 0,
                 closes: false,
                 per_command: Duration::ZERO,
+                sending_lines: Vec::new(),
+                verified: None,
             }
         }
     }
@@ -1324,10 +1361,19 @@ mod tests {
                                 if bytes[0] == 6 {
                                     note(Took::Idle);
                                 }
+                                if status.state == UpdateState::Verified
+                                    && let Some(verified) = &script.verified
+                                {
+                                    verified.notify_one();
+                                }
                                 let mut buf = [0u8; UPDATE_STATUS_MAX];
                                 let len = Op::Status(status).encode(&mut buf);
                                 let up = UpdateStatusBytes::from_slice(&buf[..len]).unwrap();
                                 events.push(LinkEvent::Message(BridgeToHost::Update(up)));
+                                if bytes[0] == 1 {
+                                    let lines = script.sending_lines.iter().cloned();
+                                    events.extend(lines.map(LinkEvent::Message));
+                                }
                             }
                             Received::Status(None) => {}
                             Received::Install(_) if answered < script.old_answers => held = true,
@@ -1520,6 +1566,41 @@ mod tests {
         assert!(!ops.contains(&4), "no `Install`");
         let idle = took.iter().find(|(what, _)| *what == Took::Idle).expect("answered `Idle`");
         assert!(idle.1 <= ended && idle.1 > started, "the update waited for the `Idle`");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn update_bridge_takes_stop_when_it_arrives_with_the_verified_status() {
+        // The stop resolves as the status that lets `Install` go arrives. The operator has been
+        // told it is stopping, so it wins.
+        let verified = Arc::new(tokio::sync::Notify::new());
+        let stop = {
+            let verified = Arc::clone(&verified);
+            async move { verified.notified().await }
+        };
+        let (updated, heard, took) = update_against(
+            |image| Script { verified: Some(verified), ..Script::new(Link::Usb, image.digest()) },
+            stop,
+        )
+        .await;
+        assert_eq!(updated, Err(Failed::Stopped));
+        assert!(heard.said.is_empty(), "{heard:?}");
+        let took = took.lock().unwrap();
+        assert!(!took.iter().any(|(what, _)| *what == Took::Op(4)), "no `Install`");
+        assert!(took.iter().any(|(what, _)| *what == Took::Idle), "the session was aborted");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn update_bridge_says_repeated_line_twice_when_image_is_still_being_sent() {
+        // No poll runs while the image is sent, so a line that arrives twice was sent twice.
+        let line = error("the radio coprocessor is not answering");
+        let (updated, heard, _) = update_with(|image| Script {
+            sending_lines: vec![line.clone(), line],
+            ..Script::new(Link::Usb, image.digest())
+        })
+        .await;
+        assert_eq!(updated, Ok(Updated::Installed));
+        let said = Progress::Line(Line::Fault("the radio coprocessor is not answering".to_owned()));
+        assert_eq!(heard.said, [said.clone(), said, Progress::Installing, Progress::Confirmed]);
     }
 
     #[tokio::test(start_paused = true)]

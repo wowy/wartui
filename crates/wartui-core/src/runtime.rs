@@ -317,10 +317,11 @@ pub enum FleetError {
 /// abort, and is the error. So is the first chunk answered `NoImage` once the image is checked
 /// ([`Failure::CacheLost`]), since every session's next chunk meets the same answer. The sessions
 /// keep their outcomes then. A `Begin` for the image the cache already holds is answered
-/// `Verified` at once, and the upload ends there. An upload dropped before the P4 verified it, by
-/// `stop` or by its failure, is ended with an `Abort` once the sessions have ended
+/// `Verified` at once, and the upload ends there. An upload left unverified, by `stop`, by its
+/// failure or by every session ending first, is ended with an `Abort` once the sessions have ended
 /// (`pace::abort`), since the P4 holds its cache session open and its SD log paused until then.
-/// A verified image is never aborted: the nodes are fed from it.
+/// One the link stopped writing is not: the `Abort` would wait behind the same stall. A verified
+/// image is never aborted: the nodes are fed from it.
 ///
 /// Every event goes to every session still running, and each reads only its own: its node's
 /// records, and the delivery answers to its own ids, which no two sessions share
@@ -363,7 +364,7 @@ pub async fn drive_fleet(
             () = &mut stop, if !stopped => {
                 stopped = true;
                 if let Some(sender) = cache.take() {
-                    abandoned = Some(sender.session());
+                    abandoned = abandon(&sender);
                 }
                 let now = now();
                 for session in sessions.iter_mut() {
@@ -427,7 +428,7 @@ pub async fn drive_fleet(
                 report(FleetReport::Cached(elapsed));
                 feed(sessions, OtaEvent::Cached, &mut sends);
             } else if let Stage::Failed(failure) = sender.stage() {
-                abandoned = Some(sender.session());
+                abandoned = abandon(sender);
                 cache = None;
                 tracing::debug!(failure = ?failure, "ota cache failed");
                 failed = Some(FleetError::Upload(failure));
@@ -479,6 +480,10 @@ pub async fn drive_fleet(
             report(FleetReport::Session(i, &now_progress));
         }
     }
+    // Every session ended before the P4 verified the upload.
+    if let Some(sender) = cache.take() {
+        abandoned = abandon(&sender);
+    }
     if let Some(session) = abandoned {
         let ended = pace::abort(link, session, HostToBridge::CacheImage, cache_status).await;
         tracing::debug!(session, ended, "ota cache aborted");
@@ -487,6 +492,13 @@ pub async fn drive_fleet(
         return Err(failure);
     }
     Ok(sessions.iter().filter_map(|session| session.outcome().cloned()).collect())
+}
+
+/// The session to end with an `Abort` for an upload given up on before the P4 verified it, or
+/// `None` when the link stopped writing it ([`PacedSender::is_stalled`]), as the `Abort` would
+/// wait behind the same stall.
+fn abandon(sender: &PacedSender<'_>) -> Option<u8> {
+    (!sender.is_stalled()).then(|| sender.session())
 }
 
 /// The status a [`BridgeToHost::CacheImage`] carries.
