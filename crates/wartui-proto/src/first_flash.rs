@@ -489,6 +489,13 @@ mod tests {
     }
 
     #[test]
+    fn first_flash_allows_scratch_when_it_ends_exactly_at_trial() {
+        let ours = plan(&ours(), factory_slot(1), 658_208).unwrap();
+        let span = scratch(&factory(), factory_slot(1), &ours, 0xC_0000).unwrap();
+        assert_eq!(span, Span { start: 0x31_0000, end: 0x3D_0000 });
+    }
+
+    #[test]
     fn first_flash_refuses_scratch_when_it_would_reach_trial() {
         let ours = plan(&ours(), factory_slot(1), 658_208).unwrap();
         let err = scratch(&factory(), factory_slot(1), &ours, 0xC_1000).unwrap_err();

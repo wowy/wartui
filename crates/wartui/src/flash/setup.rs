@@ -273,6 +273,8 @@ enum Verdict {
 enum Stopped {
     /// The loader's `failed` line: the text after `failed `.
     Failed(String),
+    /// The loader's `failed` line after a `c6` line: the C6 loader may still be writing.
+    FailedAfterC6(String),
     /// No loader line in this long.
     Quiet(Duration),
     /// No verdict in this long in all.
@@ -284,7 +286,9 @@ enum Stopped {
 impl std::fmt::Display for Stopped {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Stopped::Failed(why) => write!(f, "the loader failed: {why}"),
+            Stopped::Failed(why) | Stopped::FailedAfterC6(why) => {
+                write!(f, "the loader failed: {why}")
+            }
             Stopped::Quiet(quiet) => write!(f, "no line from the loader in {} s", quiet.as_secs()),
             Stopped::Overdue(total) => {
                 write!(f, "no verdict from the loader in {} s", total.as_secs())
@@ -305,6 +309,7 @@ fn watch(
     let started = Instant::now();
     let mut heard = started;
     let mut lines = LoaderWatch::new();
+    let mut c6_heard = false;
     let mut buffer = [0u8; 512];
     loop {
         let now = Instant::now();
@@ -329,7 +334,11 @@ fn watch(
             match said {
                 Said::Done => return Ok(Verdict::Done),
                 Said::Skipped(why) => return Ok(Verdict::Skipped(why)),
+                Said::Failed(why) if c6_heard && !why.starts_with(C6_FAILED) => {
+                    return Err(Stopped::FailedAfterC6(why));
+                }
                 Said::Failed(why) => return Err(Stopped::Failed(why)),
+                Said::C6(_) => c6_heard = true,
                 _ => {}
             }
         }
@@ -544,14 +553,18 @@ fn build_loader(dir: &Path) -> Result<PathBuf> {
 /// What the P4 loader's `failed` line carries when the C6 loader failed.
 const C6_FAILED: &str = "c6 loader: ";
 
+/// What the P4 loader's `failed` line starts with when its own deadline on the C6 loader passed.
+const C6_NO_VERDICT: &str = "no verdict from the C6 loader";
+
 /// Why the setup of `path` stopped while the loader ran, and what to do.
 fn loader_failed_text(path: &str, stopped: &Stopped) -> String {
+    const WAIT: &str = "The P4 runs the loader, and running flash-bridge again retries. The C6 \
+                        loader may still be writing, so wait a minute before running \
+                        flash-bridge again";
     let next = match stopped {
         Stopped::Failed(why) if why.starts_with(C6_FAILED) => "The C6 loader refused or failed",
-        Stopped::Quiet(_) | Stopped::Overdue(_) => {
-            "The P4 runs the loader, and running flash-bridge again retries. The C6 loader may \
-             still be writing, so wait a minute before running flash-bridge again"
-        }
+        Stopped::Failed(why) if why.starts_with(C6_NO_VERDICT) => WAIT,
+        Stopped::Quiet(_) | Stopped::Overdue(_) | Stopped::FailedAfterC6(_) => WAIT,
         Stopped::Failed(_) | Stopped::Port(_) => {
             "The P4 runs the loader, and running flash-bridge again retries"
         }
@@ -568,8 +581,8 @@ fn c6_silent_text(path: &str) -> String {
     format!(
         "{path} runs the bridge firmware, but its C6 is not answering, so the bridge is not \
          remembered. Running flash-bridge again updates the P4 and does not retry the setup. To \
-         retry it, blank the P4 with `espflash erase-region --chip esp32p4 --port {path} 0x0 \
-         0x10000`, then run flash-bridge --bridge {path} --first-flash. The C6's header is the \
+         retry it, blank the P4 with `espflash erase-region --chip esp32p4 --port {path} \
+         --non-interactive 0x0 0x10000`, then run flash-bridge --bridge {path} --first-flash. The C6's header is the \
          fallback, per {}",
         p4::FIRST_FLASH
     )
@@ -793,13 +806,24 @@ mod tests {
 
     #[test]
     fn setup_says_rerun_and_header_when_loader_fails() {
-        let stopped = Stopped::Failed("no verdict from the C6 loader in 120 s".into());
+        let stopped = Stopped::Failed("ota_begin: ESP_FAIL".into());
         let text = loader_failed_text("/dev/ttyACM0", &stopped);
         assert!(
             text.contains("running flash-bridge again retries") && text.contains(p4::FIRST_FLASH),
             "{text}"
         );
         assert!(!text.contains("wait a minute"), "{text}");
+    }
+
+    #[test]
+    fn setup_says_wait_a_minute_when_c6_loader_may_still_write() {
+        for stopped in [
+            Stopped::Failed("no verdict from the C6 loader in 120 s".into()),
+            Stopped::FailedAfterC6("something broke".into()),
+        ] {
+            let text = loader_failed_text("/dev/ttyACM0", &stopped);
+            assert!(text.contains("wait a minute before running flash-bridge"), "{text}");
+        }
     }
 
     #[test]
@@ -837,7 +861,7 @@ mod tests {
         assert!(text.contains("not remembered") && text.contains(p4::FIRST_FLASH), "{text}");
         assert!(text.contains("does not retry the setup"), "{text}");
         assert!(
-            text.contains("espflash erase-region --chip esp32p4 --port /dev/ttyACM0 0x0 0x10000"),
+            text.contains("espflash erase-region --chip esp32p4 --port /dev/ttyACM0 --non-interactive 0x0 0x10000"),
             "{text}"
         );
         assert!(text.contains("--bridge /dev/ttyACM0 --first-flash"), "{text}");

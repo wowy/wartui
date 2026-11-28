@@ -98,7 +98,7 @@ espflash write-bin --port <P4 port> --chip esp32p4 0x0 build/wartui-p4-c6-loader
 
 **On a C6 that runs ESP-Hosted, this write lands the C6 loader at once**: espflash resets the P4
 into the loader, which writes the C6 with nobody watching. Try it with a rehearsal build, or
-blank the P4 (`espflash erase-region --chip esp32p4 --port <P4 port> 0x0 0x10000`) and let
+blank the P4 (`espflash erase-region --chip esp32p4 --port <P4 port> --non-interactive 0x0 0x10000`) and let
 `wartui flash-bridge` write and watch it.
 
 ## Dependency versions

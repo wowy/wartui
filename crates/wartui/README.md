@@ -633,7 +633,7 @@ A failed setup leaves what it reached, and saves nothing:
 - **The C6 never answers.** The P4 runs the bridge firmware and the C6 holds what the loader left.
   The P4 then answers with its own address, so running `flash-bridge` again takes the ordinary
   update and does not retry the setup. To retry it, blank the P4 with
-  `espflash erase-region --chip esp32p4 --port <P4 port> 0x0 0x10000`, then run
+  `espflash erase-region --chip esp32p4 --port <P4 port> --non-interactive 0x0 0x10000`, then run
   `flash-bridge --bridge PATH --first-flash`. The error says the bridge is not remembered.
 
 The C6's header is the fallback, per `firmware/p4-bridge/README.md` § "First flash". The bench
