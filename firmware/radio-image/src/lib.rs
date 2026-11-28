@@ -10,13 +10,18 @@
 //!
 //! The C6's app descriptor embeds a build time unless `SOURCE_DATE_EPOCH` is set, so two builds
 //! of one tree would differ, and a P4 bridge built beside the C6 loader would reflash the C6 it
-//! set up. When the caller sets no `SOURCE_DATE_EPOCH`, the build gets the repository's last
-//! commit time, so the release's two jobs build one image.
+//! set up. When the caller sets no `SOURCE_DATE_EPOCH`, the build gets the time of the last
+//! commit that touched [`RADIO_INPUTS`]. Nothing reruns a build script when only `HEAD` moves, so
+//! the time must move only with what reruns it: two builds then agree whenever their radio
+//! inputs do, a cached image included, and the digest holds across releases that leave p4-radio
+//! alone. A radio input with uncommitted changes gets the current time and a warning, since a
+//! dirty tree builds no reproducible image either way.
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use wartui_proto::ota::image::appended_digest_of;
@@ -38,8 +43,8 @@ pub struct Radio {
     pub digest: [u8; 32],
 }
 
-/// What the C6's build reads, relative to this crate. Its `target` directories are left
-/// out: a change there is the build's output, not its input.
+/// What the C6's build reads, relative to this crate: what reruns the build, and what dates it.
+/// Its `target` directories are left out: a change there is the build's output, not its input.
 const RADIO_INPUTS: &[&str] = &[
     "../p4-radio/src",
     "../p4-radio/build.rs",
@@ -109,7 +114,7 @@ pub fn build(out_dir: &Path, merged: bool) -> Radio {
         }
     }
     if env::var_os("SOURCE_DATE_EPOCH").is_none() {
-        build.env("SOURCE_DATE_EPOCH", commit_time(&here));
+        build.env("SOURCE_DATE_EPOCH", build_time(&here));
     }
     run(
         build,
@@ -175,15 +180,35 @@ pub fn build(out_dir: &Path, merged: bool) -> Radio {
     Radio { app, app_path, merged, sha256, digest }
 }
 
-/// The last commit's time in seconds, from git run in `dir`, else [`FALLBACK_EPOCH`].
-fn commit_time(dir: &Path) -> String {
-    let output = Command::new("git").current_dir(dir).args(["log", "-1", "--format=%ct"]).output();
-    let time = output.ok().filter(|o| o.status.success()).and_then(|o| {
-        let text = String::from_utf8(o.stdout).ok()?;
+/// The time to build the radio image at, in seconds, from git run in `dir`: the last commit
+/// that touched [`RADIO_INPUTS`], the current time when one has uncommitted changes, and
+/// [`FALLBACK_EPOCH`] when git cannot say.
+fn build_time(dir: &Path) -> String {
+    let git = |args: Vec<String>| {
+        let output = Command::new("git").current_dir(dir).args(args).output().ok()?;
+        output.status.success().then_some(output.stdout)
+    };
+    let dirty = git(git_args(&["status", "--porcelain"], RADIO_INPUTS))
+        .is_some_and(|stdout| !stdout.is_empty());
+    if dirty {
+        println!(
+            "cargo:warning=the radio image's inputs have uncommitted changes, so it is built at \
+             the current time and matches no other build"
+        );
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
+        return now.to_string();
+    }
+    let time = git(git_args(&["log", "-1", "--format=%ct"], RADIO_INPUTS)).and_then(|stdout| {
+        let text = String::from_utf8(stdout).ok()?;
         let text = text.trim();
         text.parse::<u64>().is_ok().then(|| text.to_owned())
     });
     time.unwrap_or_else(|| FALLBACK_EPOCH.to_owned())
+}
+
+/// The git command `command`, limited to the `inputs` paths.
+fn git_args(command: &[&str], inputs: &[&str]) -> Vec<String> {
+    command.iter().chain(&["--"]).chain(inputs).map(|arg| (*arg).to_owned()).collect()
 }
 
 /// Run `command`, failing the build with `why` and its output if it fails, and with `missing`
@@ -208,5 +233,16 @@ fn run(mut command: Command, why: &str, missing: &str, hints: &[(&str, &str)]) {
             }
         }
         panic!("{message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_time_limits_git_to_radio_inputs_when_dating_the_build() {
+        let args = git_args(&["log", "-1", "--format=%ct"], &["../p4-radio/src", "../common/src"]);
+        assert_eq!(args, ["log", "-1", "--format=%ct", "--", "../p4-radio/src", "../common/src"]);
     }
 }
