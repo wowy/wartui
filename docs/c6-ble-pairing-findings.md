@@ -200,9 +200,11 @@ connection was served; each connection after it ended with `le-connection-abort-
 With `LE2MTX LE2MRX` deselected on the PC (`btmgmt phy`), the next reconnect was served on 1M.
 Reloading `btusb`, which selects every PHY again, brought the failure back.
 
-**The C6 now asks for 2M, the data length and any build interval only once the link is
-encrypted, or once a phone reads its stream** (`firmware/p4-radio/src/ble.rs`, `tune`). On that
-build, with every PHY selected on the PC:
+**The C6 now asks for 2M, the data length and any build interval only once a bond resumes or a
+pairing completes, or once a phone reads its stream** (`firmware/p4-radio/src/ble.rs`, `tune`).
+The first five rows
+ran a build that asked once the link was encrypted at all, so a fresh pairing's requests went
+out during key distribution. The last ran this one. Every PHY was selected on the PC:
 
 | Run | Result |
 | --- | --- |
@@ -211,6 +213,7 @@ build, with every PHY selected on the PC:
 | `bluetooth pair --fresh` | paired and bonded |
 | `status --link bluetooth`, four reconnects after it | 4 of 4 served, 4–5 s each, all on 2M |
 | `run --link bluetooth`, 3 min, ten nodes scanning | link up throughout; 36 of 36 status rows on 2M, `resynced_bytes` 0, `dropped_writes` 0 |
+| `bluetooth pair --fresh`, then six reconnects | paired and bonded; 6 of 6 served, 4–5 s each, all on 2M |
 
 The one 1M report is most likely a status read before the deferred PHY update completed; no
 capture was taken to show it. No btmon was taken on this build either, so the order of Encryption
