@@ -10,18 +10,21 @@ It is C, not esp-hal, because ESP-Hosted's host side exists only as an ESP-IDF c
 ## Flow
 
 1. Wait 2 s for a listener, then send `start`.
-2. Listen on the link UART (UART1, RX GPIO14, TX GPIO19, 115200 8N1) for 1.5 s. A
-   `c6-loader: ` line means a C6 loader is already running, so skip to step 7. Otherwise free
-   both pins, which are SDIO lines too.
-3. Check the RTC guard (below), then start ESP-Hosted. Starting it resets the C6.
-4. Connect to the C6. With no ESP-Hosted answering, send `skipped` and idle.
-5. Ask for the C6's version, then push the embedded image with `ota_begin`, `ota_write` in
+2. Check the RTC guard (below).
+3. Connect to the C6, which resets it. ESP-Hosted's transport event says whether it answered;
+   with no `TRANSPORT_UP` within 5 s, or a `TRANSPORT_FAILURE`, send `skipped` and idle.
+4. Ask for the C6's version, then push the embedded image with `ota_begin`, `ota_write` in
    1500-byte chunks and `ota_end`. `ota_activate` follows only on ESP-Hosted 2.6 or later; the
    factory C6 answers no version, so it goes without.
-6. Stop ESP-Hosted and reset the C6 through GPIO54: low for 100 ms, then high.
-7. Relay the C6 loader's lines for up to 120 s, until its verdict. Then idle.
+5. Stop ESP-Hosted and reset the C6 through GPIO54: low for 100 ms, then high.
+6. Relay the C6 loader's lines from the link UART (UART1, RX GPIO14, TX GPIO19, 115200 8N1)
+   for up to 120 s, until its verdict. Then idle.
 
-The loader never restarts itself.
+The loader never restarts itself, and a panic halts rather than rebooting.
+
+GPIO14 and GPIO19 are SDIO lines too. ESP-Hosted routes GPIO14–19 for SDIO from boot, before
+`app_main` runs, and never routes them again, so UART1 takes them only after
+`esp_hosted_deinit`. That is why the loader cannot listen for a C6 loader before it connects.
 
 ## What it reports
 
@@ -50,26 +53,26 @@ the C6 can be in:
 | The C6 runs | A rerun |
 | --- | --- |
 | ESP-Hosted | pushes the C6 loader again, as the first run did |
-| the C6 loader | hears it in the 1.5 s listen and only relays, so the C6 is not reset under it |
-| p4-radio | finds no ESP-Hosted and sends `skipped`, having written nothing |
+| the C6 loader | resets it at whatever step it is in, then finds no ESP-Hosted and sends `skipped` |
+| p4-radio | resets it, finds no ESP-Hosted and sends `skipped`, having written nothing |
 
 A rehearsal, and a C6 loader that refuses its plan, both select ESP-Hosted again, so a rerun
 after either starts over.
 
-The listen hears a C6 loader only between its lines, and a step can outlast 1.5 s. A rerun that
-misses it resets the C6 mid-step, which is a power cut at that step: the
+A reset of a running C6 loader is a power cut at that step. Until its last step the factory
+table still selects the C6 loader, so the C6 boots it again and it starts over, unwatched. The
 [C6 loader's table](../c6-loader/README.md#order-of-writes) shows that only its bootloader and
-table writes, a few sectors long, need the header.
+table writes need the header, and those take under a second.
 
 **The RTC guard.** ESP-Hosted restarts the P4 when the C6 does not answer it. An `RTC_NOINIT`
-word counts the attempts that reached ESP-Hosted. When the P4 boots from anything but a
-power-on or the reset pin and an attempt is recorded, the loader sends
+word counts the attempts that reached ESP-Hosted, and a power-on or the reset pin clears it.
+When the P4 boots from anything else and an attempt is recorded, the loader sends
 `skipped no ESP-Hosted on the C6 (the host restarted the P4)` and idles, so that restart cannot
 loop.
 
 ## Building
 
-`build.sh` needs ESP-IDF v5.5 exported (`. $IDF_PATH/export.sh`), and cargo and espflash on
+`build.sh` needs ESP-IDF v5.5.4 exported (`. $IDF_PATH/export.sh`), and cargo and espflash on
 the PATH.
 
 ```sh

@@ -15,9 +15,11 @@
 #include "esp_event.h"
 #include "esp_hosted.h"
 #include "esp_hosted_api_types.h"
+#include "esp_hosted_event.h"
 #include "esp_hosted_ota.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
@@ -26,11 +28,13 @@ extern const uint8_t image_end[] asm("_binary_c6_loader_bin_end");
 
 #define CHUNK 1500
 #define C6_RESET 54
-// The link UART. Both pins are SDIO lines too, so UART1 and ESP-Hosted take turns on them.
+// The link UART. Both pins are SDIO lines too, and ESP-Hosted routes them from boot, before
+// app_main, so UART1 takes them only after `esp_hosted_deinit`.
 #define LINK_RX 14
 #define LINK_TX 19
-#define PRE_LISTEN_MS 1500
 #define VERDICT_S 120
+// How long to wait for ESP-Hosted's transport after `esp_hosted_connect_to_slave` returns.
+#define HOSTED_UP_MS 5000
 
 // What the C6 loader prefixes each of its lines with.
 #define C6_PREFIX "c6-loader: "
@@ -71,13 +75,6 @@ static void link_install(void) {
     ESP_ERROR_CHECK(uart_param_config(UART_NUM_1, &cfg));
     ESP_ERROR_CHECK(
         uart_set_pin(UART_NUM_1, LINK_TX, LINK_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-}
-
-// Hands the shared pins back before SDIO takes them.
-static void link_release(void) {
-    uart_driver_delete(UART_NUM_1);
-    gpio_reset_pin(LINK_RX);
-    gpio_reset_pin(LINK_TX);
 }
 
 typedef struct {
@@ -126,28 +123,39 @@ static char *c6_text(const char *line) {
     return text;
 }
 
-// Relays one C6 loader line, and returns true when it was the verdict.
-static bool relay_line(const char *text) {
-    say("c6 %s", text);
-    if (strncmp(text, "done", 4) == 0) {
-        say("done");
-        return true;
-    }
-    if (strncmp(text, "failed ", 7) == 0) {
-        say("failed c6 loader: %s", text + 7);
-        return true;
-    }
-    return false;
-}
-
-static void relay(line_reader_t *r) {
+// Relays the C6 loader's lines until its verdict, or until the deadline.
+static void relay(void) {
+    line_reader_t reader = {0};
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(VERDICT_S * 1000);
     const char *line;
-    while ((line = read_line(r, deadline)) != NULL) {
+    while ((line = read_line(&reader, deadline)) != NULL) {
         char *text = c6_text(line);
-        if (text != NULL && relay_line(text)) return;
+        if (text == NULL) continue;
+        say("c6 %s", text);
+        if (strncmp(text, "done", 4) == 0) {
+            say("done");
+            return;
+        }
+        if (strncmp(text, "failed ", 7) == 0) {
+            say("failed c6 loader: %s", text + 7);
+            return;
+        }
     }
     say("failed no verdict from the C6 loader in %d s", VERDICT_S);
+}
+
+// `esp_hosted_connect_to_slave` returns ESP_OK whether or not the C6 answered; the transport's
+// own events say which.
+#define HOSTED_UP BIT0
+#define HOSTED_FAILED BIT1
+static EventGroupHandle_t hosted_events;
+
+static void on_hosted_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
+    if (id == ESP_HOSTED_EVENT_TRANSPORT_UP) {
+        xEventGroupSetBits(hosted_events, HOSTED_UP);
+    } else if (id == ESP_HOSTED_EVENT_TRANSPORT_FAILURE) {
+        xEventGroupSetBits(hosted_events, HOSTED_FAILED);
+    }
 }
 
 static void reset_c6(void) {
@@ -202,24 +210,12 @@ void app_main(void) {
     vTaskDelay(pdMS_TO_TICKS(2000));  // time for a listener to attach
     say("start");
 
-    // A C6 loader that is already talking is mid-run after a P4 reset. `esp_hosted_init` would
-    // reset the C6 under it, so listen first.
-    line_reader_t reader = {0};
-    link_install();
-    TickType_t listen_end = xTaskGetTickCount() + pdMS_TO_TICKS(PRE_LISTEN_MS);
-    const char *line;
-    while ((line = read_line(&reader, listen_end)) != NULL) {
-        char *text = c6_text(line);
-        if (text == NULL) continue;
-        if (!relay_line(text)) relay(&reader);
-        idle();
-    }
-    link_release();
-
-    // ESP-Hosted restarts the P4 when it finds no slave. Without this guard that restart would
-    // rerun the attempt forever; a reset the operator makes is a power-on or the reset pin.
+    // ESP-Hosted restarts the P4 when the C6 does not answer it. Without this guard that
+    // restart would rerun the attempt forever; a reset the operator makes is a power-on or the
+    // reset pin, and it starts the count over.
     esp_reset_reason_t reason = esp_reset_reason();
     bool host_reset = reason != ESP_RST_POWERON && reason != ESP_RST_EXT;
+    if (!host_reset) attempts = 0;
     bool recorded = (attempts & ATTEMPT_MASK) == ATTEMPT_MAGIC && (attempts & 0xFF) > 0;
     if (host_reset && recorded) {
         say("skipped no ESP-Hosted on the C6 (the host restarted the P4)");
@@ -233,9 +229,17 @@ void app_main(void) {
         nvs_flash_erase();
         nvs_flash_init();
     }
-    esp_event_loop_create_default();
+    hosted_events = xEventGroupCreate();
+    err = esp_event_loop_create_default();
+    if (err != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(err);  // INVALID_STATE: it exists already
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(ESP_HOSTED_EVENT, ESP_EVENT_ANY_ID,
+                                                        on_hosted_event, NULL, NULL));
+    // Connecting resets the C6, whatever it runs.
     esp_hosted_init();
-    if (esp_hosted_connect_to_slave() != ESP_OK) {
+    esp_hosted_connect_to_slave();
+    EventBits_t bits = xEventGroupWaitBits(hosted_events, HOSTED_UP | HOSTED_FAILED, pdFALSE,
+                                           pdFALSE, pdMS_TO_TICKS(HOSTED_UP_MS));
+    if ((bits & HOSTED_UP) == 0 || (bits & HOSTED_FAILED) != 0) {
         say("skipped no ESP-Hosted on the C6");
         idle();
     }
@@ -255,9 +259,8 @@ void app_main(void) {
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_hosted_deinit();
     // Listening before the reset catches the C6 loader's first line.
-    reader = (line_reader_t){0};
     link_install();
     reset_c6();
-    relay(&reader);
+    relay();
     idle();
 }

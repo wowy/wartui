@@ -5,8 +5,8 @@
 #
 # `c6` builds firmware/c6-loader, with `--features "$C6_LOADER_FEATURES"` when that is set, and
 # saves its image as main/c6-loader.bin. `p4` builds this app around that image and merges it.
-# The last line printed is the merged image's path, ready to write at 0x0. `p4` needs ESP-IDF's
-# export.sh sourced first.
+# The last line printed is the merged image's path, ready to write at 0x0. `p4` needs ESP-IDF
+# v5.5.4's export.sh sourced first.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -33,6 +33,7 @@ build_c6() {
     local size
     size=$(wc -c <"$c6_bin" | tr -d ' ')
     if ((size > c6_max)); then
+        rm -f "$c6_bin"
         echo "c6-loader.bin is $size bytes, and the factory C6's ota_1 holds $c6_max" >&2
         exit 1
     fi
@@ -41,11 +42,7 @@ build_c6() {
 
 build_p4() {
     idf.py build
-    if idf.py --help 2>/dev/null | grep -q '^  merge-bin'; then
-        idf.py merge-bin -o "$merged"
-    else
-        (cd build && esptool.py --chip esp32p4 merge_bin -o "$merged" @flash_args)
-    fi
+    idf.py merge-bin -o "$merged"
     echo "$here/build/$merged"
 }
 
