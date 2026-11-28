@@ -526,6 +526,9 @@ pub struct LinkHandle {
     /// The core of the last `Ready` read, `Connected`, `Again` or `Incompatible`, until a
     /// `Disconnected` or the transport's end.
     reached: Option<BridgeCore>,
+    /// The core of the last `Incompatible` read, until a `Connected`: kept through a
+    /// `Disconnected`, since the bridge is the same until a readable `Ready` says otherwise.
+    unread: Option<BridgeCore>,
     /// Whether the last `Ready` the transport heard went unread, which [`Self::try_send`] obeys.
     compatibility: Compatibility,
 }
@@ -550,12 +553,14 @@ impl LinkHandle {
             Some(LinkEvent::Connected(info)) => {
                 self.announced = Some(info.clone());
                 self.reached = Some(info.core());
+                self.unread = None;
             }
             Some(LinkEvent::Again(core)) => self.reached = Some(*core),
             // The life announced is gone: the bridge rebooted into a build this host cannot read.
             Some(LinkEvent::Incompatible { core, .. }) => {
                 self.announced = None;
                 self.reached = Some(*core);
+                self.unread = Some(*core);
             }
             Some(LinkEvent::Disconnected { .. }) | None => {
                 self.announced = None;
@@ -575,15 +580,27 @@ impl LinkHandle {
     }
 
     /// The core of the last `Ready` [`Self::recv`] has read, a new life's, a repeat's or an
-    /// incompatible bridge's, or `None` once a `Disconnected` or the transport's end follows it.
+    /// incompatible bridge's, or `None` once a `Disconnected` or the transport's end follows it:
+    /// the bridge reached now.
     #[must_use]
     pub fn reached(&self) -> Option<&BridgeCore> {
         self.reached.as_ref()
     }
 
+    /// The core of the last `Incompatible` [`Self::recv`] has read, until it reads a `Connected`.
+    /// Unlike [`Self::reached`] it outlives a `Disconnected` and the transport's end: the bridge
+    /// on the other end is the one this host knows it cannot read until a readable `Ready` says
+    /// otherwise. Unlike [`Self::incompatible`] it moves only as the handle reads, so a link
+    /// nothing has read yet holds nothing, however fast its transport heard a `Ready`. A capture
+    /// and the wait for a `Ready` refuse by it.
+    #[must_use]
+    pub fn heard_incompatible(&self) -> Option<&BridgeCore> {
+        self.unread.as_ref()
+    }
+
     /// The core of the last `Ready` the transport heard, while it was one whose rest this host
     /// did not read; the sends then refuse all but the frozen messages. Read from the transport,
-    /// so it can lead [`Self::recv`].
+    /// so it can lead [`Self::recv`] and [`Self::heard_incompatible`].
     #[must_use]
     pub fn incompatible(&self) -> Option<BridgeCore> {
         self.compatibility.incompatible()
@@ -704,6 +721,7 @@ pub fn link_pair() -> (LinkHandle, LinkPlumbing) {
             running: None,
             announced: None,
             reached: None,
+            unread: None,
             compatibility: compatibility.clone(),
         },
         LinkPlumbing {
@@ -1142,6 +1160,28 @@ mod tests {
         plumbing.events.send(gone).await.expect("the link reads");
         handle.recv().await.expect("the drop");
         assert!(handle.send_bulk(HostToBridge::GetStatus).is_err());
+    }
+
+    #[tokio::test]
+    async fn link_handle_keeps_incompatible_bridge_until_connected_when_link_drops() {
+        let (mut handle, plumbing) = link_pair();
+        let gone = || LinkEvent::Disconnected {
+            reason: "the bridge disconnected".to_owned(),
+            cause: DisconnectCause::Other,
+        };
+        let unread = LinkEvent::Incompatible { core: other_major(), fresh: true };
+        for event in [unread, gone(), LinkEvent::Connected(bridge()), gone()] {
+            plumbing.events.send(event).await.expect("the link reads");
+        }
+        assert_eq!(handle.heard_incompatible(), None, "nothing read yet");
+        handle.recv().await.expect("the unread `Ready`");
+        handle.recv().await.expect("the drop");
+        assert_eq!(handle.reached(), None);
+        assert_eq!(handle.heard_incompatible(), Some(&other_major()), "kept through the drop");
+        handle.recv().await.expect("a readable `Ready`");
+        assert_eq!(handle.heard_incompatible(), None, "cleared by a readable `Ready`");
+        handle.recv().await.expect("the next drop");
+        assert_eq!(handle.heard_incompatible(), None);
     }
 
     #[test]

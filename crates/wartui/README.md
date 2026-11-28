@@ -616,7 +616,10 @@ command refuses it ("Another major or build" below), and `flash-bridge` is the f
 travels in the part of the link every build shares, so it first prints what it found,
 `runs bridge firmware 1.0.0, newer than wartui 0.1.0; updating it over the frozen core`, then
 updates as above. An image that brings the bridge onto another major is judged the same way; the
-C6's progress is not printed for it, since this build does not read that bridge's lines.
+C6's progress is not printed for it, since this build does not read that bridge's lines. When the
+bridge already runs the image being sent, the run fails instead, with `already runs this image`:
+sending it again changes nothing, and the remedy is a wartui built from the tree the image came
+from, or another image.
 
 A ctrl-c while the image is sent stops the run: it ends the update on the P4, which keeps its
 image, prints `stopped before the install; … keeps its image`, and exits 130, as an interrupted

@@ -81,14 +81,14 @@
 //! transport is done with a group's commands once its request is answered or a write fails
 //! (`crate` docs), which is what paces an update's sender to the link (`crate::pace`).
 //!
-//! **Commands wait for the connection's `Ready`.** The commands queue is read only once a
-//! `Ready` of either kind has started the stream, and what it holds is dropped as the transport
-//! reports a new life's `Ready` as `Connected` or `Incompatible`, as the gate drops what decodes
-//! ahead of it. Toward an incompatible bridge the handle queues only the frozen messages. A command queued while the link was
-//! down, a USB host held the bridge or the bridge had not yet answered is stale by then: written
-//! at the next connection, an update's re-sends from a gap arrive as a backlog. Every Bluetooth
-//! caller waits for `Connected` before its first command. USB writes what was queued, since
-//! `wartui reset` writes before any `Ready`.
+//! **Commands wait for the connection's `Ready`.** The commands queue is read only once a `Ready`
+//! of either kind has started the stream, and what it holds is dropped as the transport reports a
+//! new life's `Ready` as `Connected` or `Incompatible`, as the gate drops what decodes ahead of it.
+//! Toward an incompatible bridge the handle queues only the frozen messages. A command queued while
+//! the link was down, a USB host held the bridge or the bridge had not yet answered is stale by
+//! then: written at the next connection, an update's re-sends from a gap arrive as a backlog. Every
+//! Bluetooth caller waits for `Connected` before its first command. USB writes what was queued,
+//! since `wartui reset` writes before any `Ready`.
 //!
 //! **Not bonded, and maybe not bonded, are two causes.** BlueZ never starts a first pairing on its
 //! own (`docs/c6-ble-pairing-findings.md`), so the transport says when the bridge will not serve

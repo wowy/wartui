@@ -216,8 +216,8 @@ impl Session {
     /// [`StartError::LinkInUse`] or [`StartError::LinkClosed`] for a link not idle, and
     /// [`StartError::Exists`] or [`StartError::Store`] when the store cannot be created, and
     /// [`StartError::Incompatible`] for a link whose bridge this library cannot capture over,
-    /// each of which leaves the link as it was. [`StartError::LinkClosed`] too when the start's work panicked,
-    /// which takes the link with it.
+    /// each of which leaves the link as it was. [`StartError::LinkClosed`] too when the start's
+    /// work panicked, which takes the link with it.
     #[uniffi::constructor]
     pub async fn start(
         config: CaptureConfig,

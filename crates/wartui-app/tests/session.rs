@@ -13,7 +13,7 @@ use wartui_app::session::{Controls, Refusal, Refused, Session, SessionConfig};
 use wartui_app::settings::{Config, Link, Settings, SettingsStore};
 use wartui_bridge::remember::BridgeMemory;
 use wartui_bridge::sim::{SimConfig, SimTransport};
-use wartui_bridge::{BridgeCore, LinkEvent, LinkHandle, link_pair};
+use wartui_bridge::{BridgeCore, DisconnectCause, LinkEvent, LinkHandle, link_pair};
 use wartui_core::engine::{Command, Snapshot};
 use wartui_core::gps::Gps;
 use wartui_core::position::{DEFAULT_MAX_AGE, PositionChain, Tier};
@@ -169,6 +169,38 @@ async fn session_refuses_start_when_capture_exists() {
     assert!(matches!(error, StoreError::Exists(_)), "{error:?}");
     assert_eq!(std::fs::read(&db).expect("still there"), b"", "the file is left alone");
     link.send_bulk(HostToBridge::GetStatus).expect("the link comes back, still open");
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_refuses_start_when_link_dropped_after_incompatible_ready() {
+    // The handle no longer reaches the bridge, and still knows it is one this host cannot read.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db = dir.path().join("wartui.db");
+    let (mut link, plumbing) = link_pair();
+    let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+    let core = BridgeCore {
+        mac: BRIDGE,
+        image: None,
+        version,
+        trial: Trial::Settled,
+        uptime_ms: 400,
+        standing: Standing::of(version, BRIDGE_VERSION, false),
+    };
+    plumbing.events.send(LinkEvent::Incompatible { core, fresh: true }).await.expect("read");
+    let reason = "the bridge disconnected".to_owned();
+    let down = LinkEvent::Disconnected { reason, cause: DisconnectCause::Other };
+    plumbing.events.send(down).await.expect("read");
+    link.recv().await.expect("the unread `Ready`");
+    link.recv().await.expect("the drop");
+    assert_eq!(link.reached(), None);
+
+    let refused = Session::start(config(&db), link, None, None, Settings::default());
+
+    let Err(Refused { reason: Refusal::Incompatible(refused), .. }) = refused else {
+        panic!("started over a bridge known to be incompatible")
+    };
+    assert_eq!(refused, core);
+    assert!(!db.exists(), "no capture file is left behind");
 }
 
 #[tokio::test(start_paused = true)]

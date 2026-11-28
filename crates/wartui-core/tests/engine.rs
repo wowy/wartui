@@ -4965,3 +4965,33 @@ fn engine_drops_bridge_info_when_bridge_turns_incompatible() {
     assert_eq!(core.standing, Standing::Apart { older: wartui_proto::link::End::Host });
     assert!(!engine.bridge_connected());
 }
+
+#[test]
+fn engine_drops_setting_command_when_bridge_is_incompatible() {
+    // A setting only asks, and the engine keeps no record of it, so none is replayed. The scan
+    // mode is a want the engine holds, and is asked for again.
+    let clock = Clock::new();
+    let config = EngineConfig { auto_start: true, ..EngineConfig::default() };
+    let mut engine = FleetEngine::new(config, clock.at(0));
+    engine.handle(incompatible(), clock.at(0));
+    let pool =
+        engine.handle(Event::Command(Command::SetPool { pool: ChannelPool::Us }), clock.at(1));
+    let fan = FanDuty::new(60).expect("in range");
+    let duty = engine.handle(Event::Command(Command::SetFanDuty { duty: fan }), clock.at(1));
+    let mode = engine.handle(Event::Command(Command::SetBluetooth(true)), clock.at(1));
+    for batch in [&pool, &duty, &mode] {
+        assert!(batch.urgent.is_empty() && batch.bulk.is_empty(), "{batch:?}");
+    }
+
+    let back = engine.handle(connected(), clock.at(2));
+    let stopped = engine.handle(scan_status(ScanMode::Stopped), clock.at(2));
+    let sent: Vec<&HostToBridge> =
+        back.urgent.iter().chain(&back.bulk).chain(&stopped.urgent).chain(&stopped.bulk).collect();
+    assert!(
+        !sent
+            .iter()
+            .any(|cmd| matches!(cmd, HostToBridge::SetPool { .. } | HostToBridge::SetFan { .. })),
+        "{sent:?}"
+    );
+    assert!(sent.contains(&&HostToBridge::StartScan { bluetooth: true }), "{sent:?}");
+}

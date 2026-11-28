@@ -235,9 +235,9 @@ pub enum Failed {
 /// Update the bridge on `link`, reached over `over`, to `image`. `running` is the image the
 /// bridge's `Ready` named: `BridgeInfo::image`, or `BridgeCore::image` from
 /// [`LinkHandle::reached`] for a bridge that announced nothing, which this host cannot read.
-/// Opening the link and waiting for that `Ready` are the caller's. `stop` resolves when the caller wants the update stopped, which is taken
-/// only while the image is sent (the module's `//!`). `say` is `Send`, so a phone's binding runs
-/// the update as a task of its own runtime.
+/// Opening the link and waiting for that `Ready` are the caller's. `stop` resolves when the caller
+/// wants the update stopped, which is taken only while the image is sent (the module's `//!`).
+/// `say` is `Send`, so a phone's binding runs the update as a task of its own runtime.
 ///
 /// # Errors
 /// How the update failed.

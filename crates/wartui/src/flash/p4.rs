@@ -46,6 +46,7 @@ use wartui_bridge::{BridgeCore, LinkHandle};
 use wartui_proto::bus::UpdateState;
 use wartui_proto::link::{BRIDGE_VERSION, End, Standing};
 use wartui_proto::mac::{self, Mac};
+use wartui_proto::ota::image::DIGEST_LEN;
 use wartui_proto::radio_link::update::Failure;
 
 use super::bridge::Args;
@@ -118,10 +119,38 @@ pub(super) async fn run(args: &Args, target: Target) -> Result<()> {
     let path = obtain(&P4_BRIDGE_APP, &source)?;
     let image = app::checked(&path, BridgeImage::parse(read(&path)?))?;
     let (link, over, core, label) = crate::interruptible(open(target, label)).await?;
-    if !core.compatible() {
-        println!("{label:<6} {}", found_text(&core));
+    if let Some(found) =
+        before_update(&label, &core, &image.digest()).map_err(anyhow::Error::msg)?
+    {
+        println!("{label:<6} {found}");
     }
     update_over_link(link, over, &core, &label, &image).await
+}
+
+/// What to say before updating the bridge `label`, whose `Ready` carried `core`, to the image
+/// named `digest`: nothing for a bridge this build reads, and what it found for one it reads only
+/// for its frozen core.
+///
+/// # Errors
+/// That incompatible bridge already runs this image: sending it again changes nothing, and the
+/// remedy is a wartui that reads it, or another image.
+fn before_update(
+    label: &str,
+    core: &BridgeCore,
+    digest: &[u8; DIGEST_LEN],
+) -> Result<Option<String>, String> {
+    if core.compatible() {
+        return Ok(None);
+    }
+    if core.image == Some(*digest) {
+        return Err(format!(
+            "{label} already runs this image, bridge firmware {}, which this build of wartui \
+             ({BRIDGE_VERSION}) reads only for its frozen core. Use a wartui built from the tree \
+             the image came from, or send a different image",
+            core.version
+        ));
+    }
+    Ok(Some(found_text(core)))
 }
 
 /// What this command says of a bridge it reads only for its frozen core, before it updates it.
@@ -597,6 +626,31 @@ mod tests {
         assert!(text.contains(&format!("{version}, newer than wartui {BRIDGE_VERSION}")), "{text}");
         let other = BridgeCore { version: BRIDGE_VERSION, standing: Standing::OtherBuild, ..core };
         assert!(found_text(&other).contains("another build"), "{}", found_text(&other));
+    }
+
+    #[test]
+    fn flash_p4_refuses_when_incompatible_bridge_already_runs_the_image() {
+        // The update would end `AlreadyCurrent` and leave the bridge as unreadable as it was.
+        let version = wartui_proto::bus::Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        let digest = [0x11; DIGEST_LEN];
+        let core = BridgeCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+            image: Some(digest),
+            version,
+            trial: wartui_proto::link::Trial::Settled,
+            uptime_ms: 400,
+            standing: Standing::of(version, BRIDGE_VERSION, false),
+        };
+        let refused = before_update("44:C0", &core, &digest).expect_err("a failure");
+        assert!(refused.starts_with("44:C0 already runs this image"), "{refused}");
+        assert!(refused.contains("reads only for its frozen core"), "{refused}");
+        assert!(refused.contains("a wartui built from the tree the image came from"), "{refused}");
+
+        // Another image is sent, and a readable bridge is said nothing of.
+        let other = before_update("44:C0", &core, &[0x22; DIGEST_LEN]).expect("sent");
+        assert!(other.is_some_and(|found| found.contains("updating it over the frozen core")));
+        let readable = BridgeCore { version: BRIDGE_VERSION, standing: Standing::Same, ..core };
+        assert_eq!(before_update("44:C0", &readable, &digest), Ok(None));
     }
 
     #[test]

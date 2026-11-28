@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
-use wartui_app::ops;
+use wartui_app::ops::{self, NotReady};
 use wartui_app::settings::Link as Over;
 use wartui_app::update::bridge::{self, Failed, Line, Updated};
 use wartui_app::update::image::{
@@ -1275,10 +1275,6 @@ async fn hear(
     dropped: oneshot::Receiver<()>,
 ) -> Result<Arc<NodesHeard>, UpdateError> {
     let mut handle = lend(&inner).await?;
-    if let Some(core) = handle.incompatible() {
-        inner.give_back(handle);
-        return Err(UpdateError::incompatible(core));
-    }
     let over = if inner.is_simulated() { Over::Usb } else { Over::Bluetooth };
     // Both are safe to drop mid-read: the handle keeps the announcement it reads.
     let heard = tokio::select! {
@@ -1288,28 +1284,49 @@ async fn hear(
     };
     inner.give_back(handle);
     // Nobody reads the result of a listen the phone stopped awaiting.
-    let Some((heard, board)) = heard else { return Err(UpdateError::Closed) };
-    match heard {
-        Ok(heard) => Ok(Arc::new(NodesHeard { heard, board })),
-        Err(LinkClosed) => Err(UpdateError::Closed),
+    let Some(heard) = heard else { return Err(UpdateError::Closed) };
+    match heard? {
+        (Ok(heard), board) => Ok(Arc::new(NodesHeard { heard, board })),
+        (Err(LinkClosed), _) => Err(UpdateError::Closed),
+    }
+}
+
+/// Wait up to `within` for the bridge's `Ready` when `link` holds no announcement, and refuse a
+/// bridge this library reads only for its frozen core: one whose `Ready` that wait reads, one the
+/// handle read before, or one its transport has heard already.
+async fn ready_or_refused(
+    link: &mut LinkHandle,
+    over: Over,
+    within: Duration,
+) -> Result<(), UpdateError> {
+    if link.announced().is_none() {
+        let waited = ops::ready(link, over, within, ops::REPLY_TIMEOUT, &mut |_| {}).await;
+        if let Err(NotReady::Incompatible(core)) = waited.ready {
+            return Err(UpdateError::incompatible(core));
+        }
+    }
+    match link.heard_incompatible().copied().or_else(|| link.incompatible()) {
+        Some(core) => Err(UpdateError::incompatible(core)),
+        None => Ok(()),
     }
 }
 
 /// The nodes `link` hears for `period`, and the board announced when the listen starts, which
 /// labels their slots.
+///
+/// # Errors
+/// [`UpdateError::Incompatible`] for a bridge this library reads only for its frozen core.
 async fn listened(
     link: &mut LinkHandle,
     over: Over,
     period: Duration,
-) -> (Result<Heard, LinkClosed>, NodeBoard) {
-    if link.announced().is_none() {
-        // The slots are labeled on the board an announcement names, so one not yet held is
-        // waited for first, up to the listen's own length.
-        ops::ready(link, over, period, ops::REPLY_TIMEOUT, &mut |_| {}).await;
-    }
+) -> Result<(Result<Heard, LinkClosed>, NodeBoard), UpdateError> {
+    // The slots are labeled on the board an announcement names, so one not yet held is waited
+    // for first, up to the listen's own length.
+    ready_or_refused(link, over, period).await?;
     // Labeled as a capture's view labels them: no carrier before an announcement.
     let board = link.announced().map_or(NodeBoard::NoCarrier, |bridge| bridge.node_board);
-    (nodes::listen(link, period).await, board)
+    Ok((nodes::listen(link, period).await, board))
 }
 
 /// [`Link::update_nodes`]'s work, on the library's runtime. `dropped` resolves once the phone
@@ -1322,19 +1339,44 @@ async fn update_nodes(
     dropped: oneshot::Receiver<()>,
 ) -> Result<NodesUpdated, UpdateError> {
     let mut handle = lend(&inner).await?;
-    if let Some(core) = handle.incompatible() {
-        inner.give_back(handle);
-        return Err(UpdateError::incompatible(core));
-    }
+    let over = if inner.is_simulated() { Over::Usb } else { Over::Bluetooth };
     let say = |progress: nodes::Progress| {
         if let Some(listener) = &listener {
             // A listener that fails is the phone's to notice; the update goes on.
             let _ = listener.progress(progress.into());
         }
     };
-    let ended = nodes::run(&mut handle, &plan.plan, halted(stopper, dropped), say).await;
+    let ended = run_nodes(&mut handle, over, &plan.plan, halted(stopper, dropped), say).await;
     inner.give_back(handle);
-    Ok(ended.into())
+    ended.map(NodesUpdated::from)
+}
+
+/// Run `plan` over `link` until `stop`, once the bridge is known to be one this library reads
+/// past its frozen core: a link that holds no announcement waits up to `ops::REPLY_TIMEOUT` for
+/// its `Ready` first, and a stop meanwhile ends the run before it starts.
+///
+/// # Errors
+/// [`UpdateError::Incompatible`] for a bridge this library reads only for its frozen core.
+async fn run_nodes(
+    link: &mut LinkHandle,
+    over: Over,
+    plan: &nodes::Plan,
+    stop: impl Future<Output = ()>,
+    say: impl FnMut(nodes::Progress),
+) -> Result<Ended, UpdateError> {
+    tokio::pin!(stop);
+    tokio::select! {
+        biased;
+        () = &mut stop => {
+            return Ok(Ended { outcomes: Vec::new(), cut_short: Some(AppCutShort::BeforeStart) });
+        }
+        ready = ready_or_refused(link, over, ops::REPLY_TIMEOUT) => ready?,
+    }
+    let ended = nodes::run(link, plan, stop, say).await;
+    match ended.cut_short {
+        Some(AppCutShort::Incompatible(core)) => Err(UpdateError::incompatible(core)),
+        _ => Ok(ended),
+    }
 }
 
 /// [`Link::update_bridge`]'s work, on the library's runtime. `dropped` resolves once the phone
@@ -1389,9 +1431,63 @@ fn passed_on(last: &mut Option<u8>, progress: &bridge::Progress) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use wartui_app::update::bridge::Progress;
+    use std::collections::HashMap;
 
-    use super::passed_on;
+    use wartui_app::update::bridge::Progress;
+    use wartui_bridge::{BridgeCore, LinkEvent, LinkPlumbing, link_pair};
+    use wartui_proto::link::Trial;
+
+    use super::*;
+
+    /// The core of a bridge one major past this library's.
+    fn other_major() -> BridgeCore {
+        let version = Version::new(BRIDGE_VERSION.major + 1, 0, 0);
+        BridgeCore {
+            mac: [0x02, 0x00, 0x5E, 0x10, 0x44, 0xC0],
+            image: None,
+            version,
+            trial: Trial::Settled,
+            uptime_ms: 400,
+            standing: Standing::of(version, BRIDGE_VERSION, false),
+        }
+    }
+
+    /// The transport hearing its first `Ready`, unread, a moment into the call.
+    async fn answer_unread(plumbing: LinkPlumbing) -> LinkPlumbing {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        plumbing.compatibility.heard(&other_major());
+        let unread = LinkEvent::Incompatible { core: other_major(), fresh: true };
+        plumbing.events.send(unread).await.expect("the link reads");
+        plumbing
+    }
+
+    fn refused(core: BridgeCore) -> UpdateError {
+        UpdateError::incompatible(core)
+    }
+
+    #[tokio::test]
+    async fn hear_nodes_refuses_when_first_ready_is_unread() {
+        // No `ready` came first, so nothing was known of the bridge when the listen began.
+        let (mut link, plumbing) = link_pair();
+        let start = tokio::time::Instant::now();
+        let period = Duration::from_secs(6);
+        let (heard, _plumbing) =
+            tokio::join!(listened(&mut link, Over::Bluetooth, period), answer_unread(plumbing));
+        let Err(error) = heard else { panic!("listened over an incompatible bridge") };
+        assert_eq!(error.to_string(), refused(other_major()).to_string());
+        assert!(matches!(error, UpdateError::Incompatible { .. }));
+        assert!(start.elapsed() < period, "refused at the answer, not after the listen");
+    }
+
+    #[tokio::test]
+    async fn update_nodes_refuses_when_first_ready_is_unread() {
+        let (mut link, plumbing) = link_pair();
+        let plan = nodes::Plan::of(Vec::new(), HashMap::new(), false);
+        let run = run_nodes(&mut link, Over::Bluetooth, &plan, std::future::pending(), |_| {});
+        let (ended, mut plumbing) = tokio::join!(run, answer_unread(plumbing));
+        assert!(matches!(ended, Err(UpdateError::Incompatible { .. })), "{ended:?}");
+        assert!(plumbing.commands.try_recv().is_none(), "nothing was sent");
+    }
 
     #[test]
     fn passed_on_drops_a_sending_when_its_percent_is_the_last_passed_on() {

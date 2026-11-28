@@ -21,8 +21,9 @@
 //!
 //! **A link heard as incompatible is refused before the store exists.** A bridge whose last `Ready`
 //! this host read only for its frozen core takes no capture, so a front end that waited on it is
-//! told why ([`Refusal::Incompatible`]) with no capture file left behind. A link not yet read, as
-//! `run` hands one, has heard nothing: there the capture starts, and its engine shows the fault.
+//! told why ([`Refusal::Incompatible`]) with no capture file left behind, the link dropped since or
+//! not (`LinkHandle::heard_incompatible`). A link not yet read, as `run` hands one, has heard
+//! nothing: there the capture starts, and its engine shows the fault.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -150,7 +151,7 @@ impl Session {
         settings: Settings,
     ) -> Result<Self, Refused> {
         if announced.is_none()
-            && let Some(core) = link.reached().filter(|core| !core.compatible()).copied()
+            && let Some(&core) = link.heard_incompatible()
         {
             return Err(Refused { reason: Refusal::Incompatible(core), link: Box::new(link) });
         }

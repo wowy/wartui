@@ -38,8 +38,10 @@
 //! **An incompatible bridge is reached, and not served.** A `Ready` whose rest this host did not
 //! read ([`LinkEvent::Incompatible`]) shares only the frozen core: the link is down for a capture,
 //! the previous life's [`BridgeInfo`] goes, and the engine sends, polls and records nothing until
-//! a `Connected` restores normal service. It keeps the bridge's core for the view to name the
-//! fault ([`Snapshot::incompatible`]).
+//! a `Connected` restores normal service. The scan mode and the GPS receiver's settings it holds
+//! are asked again then; any other command issued meanwhile is dropped, since a command only asks
+//! and the engine holds no record of it. It keeps the bridge's core for the view to name the fault
+//! ([`Snapshot::incompatible`]).
 //!
 //! `tracing` is the engine's one side channel. It logs each fall behind the bridge and each
 //! catch-up, with the pair of bridge stamps that decided it ([`FleetEngine::note_arrival`]). Those
@@ -323,11 +325,15 @@ impl FleetEngine {
             Event::Link(LinkEvent::Again(_)) => {}
             Event::Link(LinkEvent::Message(msg)) => self.on_message(&msg, now, &mut batch),
         }
-        // Toward a bridge this host cannot read, nothing goes out: what a command asks is kept,
-        // and asked again once a `Connected` restores the link.
+        // Toward a bridge this host cannot read, nothing goes out. The wants the engine holds
+        // survive and are asked again once a `Connected` restores the link: the scan mode, through
+        // the `Status` its poll brings, and the GPS receiver's rate and sky, written with that
+        // poll. Every other command only asks, and the engine believes what the next `Status`
+        // reports, so one issued now is dropped.
         if self.incompatible.is_some() {
-            batch.urgent.clear();
-            batch.bulk.clear();
+            for cmd in batch.urgent.drain(..).chain(batch.bulk.drain(..)) {
+                tracing::debug!(?cmd, "dropped a command toward a bridge this host cannot read");
+            }
         }
         batch
     }

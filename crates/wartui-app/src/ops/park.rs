@@ -8,12 +8,12 @@
 //! drops it, and [`Parked::resume`] keeps nothing it read: the next reader starts caught up to
 //! within what arrives between the stop and its first read.
 //!
-//! **The announcement stays current.** The transport announces a bridge once per life, and the
-//! next capture is handed the last one. The handle keeps it ([`LinkHandle::announced`]), so a link
-//! parks with the announcement its last reader left it, and no caller can hand it another. A
-//! `Connected` while parked is the announcement, and an `Incompatible` or a `Disconnected`,
-//! whatever its cause, clears it: the transport announces again once the bridge is back. A transport that ended is read no
-//! more, and comes back with no announcement. The task mirrors the handle's into a watch, so the
+//! **The announcement stays current.** The transport announces a bridge once per life, and the next
+//! capture is handed the last one. The handle keeps it ([`LinkHandle::announced`]), so a link parks
+//! with the announcement its last reader left it, and no caller can hand it another. A `Connected`
+//! while parked is the announcement, and an `Incompatible` or a `Disconnected`, whatever its cause,
+//! clears it: the transport announces again once the bridge is back. A transport that ended is read
+//! no more, and comes back with no announcement. The task mirrors the handle's into a watch, so the
 //! announcement is readable while parked ([`Parked::announced`]) and a save between captures
 //! remembers the bridge connected now.
 

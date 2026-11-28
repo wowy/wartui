@@ -77,14 +77,14 @@ const PROBE_GARBLE_LIMIT: u32 = 64;
 
 /// The longest a proven connection goes without writing a frame.
 ///
-/// The P4 writes to a host only while it hears one, and stops [`HOST_SILENCE_SECS`] after the
-/// last frame it decodes (`firmware/p4-bridge/src/host.rs`). A command waiting on something else —
-/// an operator's answer, an image build, a node's heartbeat — would otherwise go deaf partway. So a
+/// The P4 writes to a host only while it hears one, and stops [`HOST_SILENCE_SECS`] after the last
+/// frame it decodes (`firmware/p4-bridge/src/host.rs`). A command waiting on something else — an
+/// operator's answer, an image build, a node's heartbeat — would otherwise go deaf partway. So a
 /// connection that has written nothing for this long sends a `GetStatus`, or an `Identify` toward
-/// an incompatible bridge, which cannot decode this host's `GetStatus`. Twice the engine's
-/// 5 s status poll, so a running capture never needs one: the engine checks for a due poll
-/// only on its tick, and a keepalive on the same interval would usually fire first and double
-/// the polls. Never before the first `Ready`: until then the board is unproven ([`connect`]).
+/// an incompatible bridge, which cannot decode this host's `GetStatus`. Twice the engine's 5 s
+/// status poll, so a running capture never needs one: the engine checks for a due poll only on its
+/// tick, and a keepalive on the same interval would usually fire first and double the polls. Never
+/// before the first `Ready`: until then the board is unproven ([`connect`]).
 ///
 /// [`HOST_SILENCE_SECS`]: wartui_proto::link::HOST_SILENCE_SECS
 const KEEPALIVE: Duration = Duration::from_secs(10);

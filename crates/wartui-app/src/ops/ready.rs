@@ -13,9 +13,10 @@
 //!
 //! **An incompatible bridge ends the wait at once** ([`NotReady::Incompatible`]): it answered, with
 //! a `Ready` whose rest this host cannot read, and it announces nothing. It shares the frozen core
-//! alone with this host, so every command behind this wait refuses it the same way; only an
-//! update, which needs no announcement, goes on, from the core the handle keeps
-//! (`LinkHandle::reached`). A link whose last `Ready` was such a one answers so at once.
+//! alone with this host, so every command behind this wait refuses it the same way; only an update,
+//! which needs no announcement, goes on, from the core the handle keeps (`LinkHandle::reached`). A
+//! link whose last `Ready` read was such a one answers so at once, though the link dropped since
+//! (`LinkHandle::heard_incompatible`).
 
 use std::time::Duration;
 
@@ -73,10 +74,8 @@ pub async fn ready(
     notice: &mut (dyn FnMut(ReadyNotice) + Send),
 ) -> ReadyWaited {
     // Its `Ready` has gone by, and the transport sends one only as asked.
-    if link.announced().is_none()
-        && let Some(core) = link.reached().filter(|core| !core.compatible())
-    {
-        return ReadyWaited { ready: Err(NotReady::Incompatible(*core)), garbled: false };
+    if let Some(&core) = link.heard_incompatible() {
+        return ReadyWaited { ready: Err(NotReady::Incompatible(core)), garbled: false };
     }
     let mut until = tokio::time::Instant::now() + within;
     let mut wait = ReadyWait::new(over);
@@ -388,6 +387,23 @@ mod tests {
         assert_eq!(start.elapsed(), Duration::ZERO);
         let again = super::ready(&mut link, Link::Usb, within, USUAL, &mut |_| {}).await;
         assert_eq!(again.ready, Err(NotReady::Incompatible(other_major())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_wait_ends_incompatible_when_link_dropped_after_incompatible_ready() {
+        let (mut link, plumbing) = link_pair();
+        let event = LinkEvent::Incompatible { core: other_major(), fresh: true };
+        plumbing.events.send(event).await.expect("the link reads");
+        let reason = "the bridge disconnected".to_owned();
+        let down = LinkEvent::Disconnected { reason, cause: DisconnectCause::Other };
+        plumbing.events.send(down).await.expect("the link reads");
+        link.recv().await.expect("the unread `Ready`");
+        link.recv().await.expect("the drop");
+        let start = tokio::time::Instant::now();
+        let within = Duration::from_secs(30);
+        let waited = super::ready(&mut link, Link::Bluetooth, within, USUAL, &mut |_| {}).await;
+        assert_eq!(waited.ready, Err(NotReady::Incompatible(other_major())));
+        assert_eq!(start.elapsed(), Duration::ZERO, "the bridge is known already");
     }
 
     #[tokio::test(start_paused = true)]
