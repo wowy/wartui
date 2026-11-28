@@ -120,10 +120,14 @@ temperature, rail and heap, or none before the C6 has sent one. esp-hal has no P
 
 ## First flash
 
-The Type-C reaches the P4's UART0 through a CH343, so the runner needs `--port <that port>`. It is
-the port the bridge's link then runs on, so quit any `wartui` holding it first. The runner
-writes `partitions.csv` and erases `otadata`, so the P4 boots the image just written. It leaves
-`nvs`, where the P4 keeps its settings and bonds, as it was.
+A new board is set up by `wartui flash-bridge`, over the same Type-C cable
+(`crates/wartui/README.md` § "Flashing the bridge"). It writes this firmware's merged image whole,
+which clears `nvs`, where the P4 keeps its settings and bonds.
+
+The runner below is for a board that already ran wartui, and leaves `nvs` as it was. The Type-C
+reaches the P4's UART0 through a CH343, so the runner needs `--port <that port>`. It is the port
+the bridge's link then runs on, so quit any `wartui` holding it first. The runner writes
+`partitions.csv` and erases `otadata`, so the P4 boots the image just written.
 
 `partitions.csv` is the P4's own table: two app slots of 0x7F0000 bytes, about 7.9 MiB each,
 `ota_0` and `ota_1`, and a `trial` sector at 0xFF0000. An update writes only the spare slot,
@@ -143,9 +147,9 @@ espflash resets the board through the CH343 and reboots it into the new image, s
 EN and GPIO35 through a transistor pair. If a P4 shows `303a:0012` on USB and espflash cannot reach
 it, replug the board: one bench P4 in that state ignored CH343 resets until it was replugged.
 
-The C6 is flashed through its header once, and the P4 stays in download mode while it is: see
-[`firmware/p4-radio`](../p4-radio/README.md#first-flash). After that, updating the P4 updates
-both chips.
+The C6 is set up once, by `flash-bridge` or through its header, in which case the P4 stays in
+download mode while it is: see [`firmware/p4-radio`](../p4-radio/README.md#first-flash). After
+that, updating the P4 updates both chips.
 
 A board on espflash's default table has no second app slot and refuses updates, saying so with
 every `Ready`. Flash it by hand once more, with this table.
@@ -205,8 +209,8 @@ Bluetooth host has started advertising, and one that has not advertised 30 s aft
 itself, which spends a trial boot ([`firmware/p4-radio/README.md`](../p4-radio/README.md)
 § "Updates"). The host sees the C6's reboot as a new bridge life, with a fresh `Ready`.
 
-Meanwhile the bridge announces the C6's MAC. With a C6 image of about 570 KB, `flash-bridge`
-updated both chips in 11 s and 17 s on the bench
+Meanwhile the bridge announces the C6's MAC. The C6 image is about 643 KiB. On the bench,
+`flash-bridge` updated both chips in 11 s and 17 s with a 570 KB one
 ([`docs/p4-uart-link-findings.md`](../../docs/p4-uart-link-findings.md)). A bundled image that will
 not take is tried again on every power-up, about 30 s each time, until a P4 with a fixed image is
 flashed.

@@ -601,22 +601,34 @@ save fails, the update still succeeds and a line says why.
 answers, none is remembered and none is named by address, `flash-bridge` offers to set it up; a
 `--bridge` path is offered whenever its CH343 is silent. Each silent CH343 is asked
 `espflash board-info`, and only one that names an `esp32p4` is offered. Several are refused: name
-one with `--bridge PATH`. A terminal is asked `[y/N]`, and `--first-flash` answers yes; with
-neither, the run is refused. The setup clears the board's settings and Bluetooth bonds.
+one with `--bridge PATH`. A P4 that answers is never set up; it takes the ordinary update.
+
+The prompt names the board by its path and the last two octets of its P4's address, and says the
+setup replaces both chips' firmware, takes about two minutes, clears the board's settings and
+Bluetooth bonds, and leaves the bridge known by its C6's address. A terminal is asked `[y/N]`, and
+`--first-flash` answers yes; with neither, the run is refused.
 
 1. It writes the P4 C6 loader, which pushes the C6 its own loader through ESP-Hosted. Lines
    prefixed `C6` are the C6 loader's.
 2. It waits for the loader's verdict: up to 60 s for each line, and 300 s in all. A C6 with no
    ESP-Hosted is passed over, since it may run the bridge's radio already.
-3. It writes the bridge firmware's merged image.
+3. It writes the bridge firmware's merged image whole, which clears `nvs`.
 4. It waits up to 90 s for the bridge to answer with its C6's address. That address names the
    bridge from then on, and is saved as a found board is.
 
 The loader comes from `--loader`, else a release's, else `firmware/p4-c6-loader/build.sh`, which
-needs ESP-IDF v5.5.4 exported. The bridge firmware comes from `--firmware-dir`, else a release's, else the checkout.
-`--image` is refused, since it is app-only. A failed loader leaves it running on the P4, and running `flash-bridge` again
-retries. A C6 that stays silent leaves nothing saved. Either way, the C6's header is the fallback,
-per `firmware/p4-bridge/README.md` § "First flash".
+needs ESP-IDF v5.5.4 exported ([`firmware/p4-c6-loader`](../../firmware/p4-c6-loader/README.md),
+[`firmware/c6-loader`](../../firmware/c6-loader/README.md)). The bridge firmware comes from
+`--firmware-dir`, else a release's, else the checkout. `--image` is refused, since it is app-only.
+
+A failed setup leaves what it reached, and running `flash-bridge` again retries:
+
+- **The loader or its verdict fails.** The P4 keeps running the loader. Nothing is saved.
+- **The C6 never answers.** The P4 runs the bridge firmware and the C6 holds what the loader left.
+  Nothing is saved, and the error says the bridge is not remembered.
+
+The C6's header is the fallback, per `firmware/p4-bridge/README.md` § "First flash". The bench
+record is [`docs/c6-first-flash-findings.md`](../../docs/c6-first-flash-findings.md).
 
 The image comes from the same three sources as `flash-fleet`'s, with `firmware/p4-bridge` for
 `firmware/node`; a release publishes one under the same
