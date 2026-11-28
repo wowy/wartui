@@ -604,24 +604,33 @@ and it fits the P4's app slot of 0x7F0000 bytes, about 7.9 MiB.
 
 The run opens the bridge, checks it answers as a P4 with the chosen address, and sends the image.
 The P4 checks it, switches slots and reboots into it on trial. The connection holds through the
-reboot, and the run asks for a status every second, since a rebooted P4 says nothing until it hears
-a host. It waits up to 120 s for the P4 to come back, and the first frame after the C6 answers
-confirms the image. When the new image carries a new C6
-image, the P4 then updates its C6, and the run prints that progress for up to 30 s. A P4 already
-running the image is left alone. The board prints, by its last two octets:
+reboot, and the run asks the P4 to announce itself every second, since a rebooted P4 says nothing
+until it hears a host. It waits up to 120 s for the P4 to come back, and the first frame after the
+C6 answers confirms the image. Each announcement names the image the P4 runs and whether it is
+still on trial, and the run reads the outcome from them. Each line the bridge repeats with its
+announcement is printed once. When the new image carries a new C6 image, the P4 then updates its
+C6, and the run prints that progress for up to 30 s. A P4 already running the image is left alone.
 
-| Line                                              | Meaning                                                  |
-|---------------------------------------------------|----------------------------------------------------------|
-| `n%  sending`                                     | The image is on its way                                  |
-| `installing; waiting for the bridge to come back` | The P4 holds the whole image and is rebooting into it    |
-| `installed and confirmed`                         | The P4 came back on the new image and confirmed it       |
-| `fault  …`, `Info  …`                             | A line the bridge sent, such as its C6's update progress |
-| `already runs this image`                         | Nothing was sent                                         |
+A ctrl-c while the image is sent stops the run: it ends the update on the P4, which keeps its
+image. Once `installing` is printed the run goes on to the outcome, since only a host confirms the
+new image; a second ctrl-c exits at once. The board prints, by its last two octets:
+
+| Line                                               | Meaning                                                  |
+|----------------------------------------------------|----------------------------------------------------------|
+| `n%  sending`                                      | The image is on its way                                  |
+| `installing; waiting for the bridge to come back`  | The P4 holds the whole image and is rebooting into it    |
+| `installed and confirmed`                          | The P4 came back on the new image and confirmed it       |
+| `fault  …`, `Info  …`                              | A line the bridge sent, such as its C6's update progress |
+| `already runs this image`                          | Nothing was sent                                         |
+| `stopping; ending the bridge's update session`     | A ctrl-c while sending; the run ends                     |
+| `installing, so the update runs to its outcome; …` | A ctrl-c after the install; a second one exits           |
 
 The run fails, and the P4 keeps the image it ran, when:
 
 - The P4 came back on its old image: the new one did not boot, and its trial watchdog rolled it
   back on its third boot.
+- A ctrl-c stopped the run before the install: `stopped before the install`. Run `flash-bridge`
+  again.
 - The link dropped mid-transfer, the P4 restarted into another image, or the P4 could not
   switch to the image it received. Run `flash-bridge` again. A restart of the C6 alone does not
   stop the transfer.
@@ -637,9 +646,10 @@ The run fails, and the P4 keeps the image it ran, when:
   hubs, and not from its own port or through one USB 2.0 hub
   (`docs/p4-host-uart-findings.md` § "A Mac host behind a dock's hub chain").
 
-The run also fails when the P4 came back on the new image but did not report it confirmed within
-3 s. The image is then still on trial and rolls back unless a host confirms it: run `flash-bridge`
-again, or any `wartui` command that opens the bridge.
+The run also fails when the P4 came back on the new image and still announces it on trial 3 s
+later, or announces that confirming it failed (`could not confirm it`, after the P4's own line
+saying why). The image then rolls back unless a host confirms it: run `flash-bridge` again, or any
+`wartui` command that opens the bridge.
 
 #### Over Bluetooth
 
@@ -651,8 +661,9 @@ saying so when the bridge does not report it stopped; the P4 boots stopped eithe
 The P4's reboot resets its C6, which drops the link, and when the new image carries a new C6 image
 the C6's update drops it again. The transport reconnects each time, and the run reads the outcome
 across the reconnects: it waits up to 180 s for the bridge to come back, then up to 150 s more, long
-enough for three trial boots to end in a rollback. It ends once the new image is confirmed and the
-link has stayed up 5 s with no line about the C6's update. An update takes about 80 s over
+enough for three trial boots to end in a rollback. It asks the bridge to announce itself as soon as
+the link comes back, and every second after. It ends once an announcement says the new image is
+confirmed and the link has stayed up 5 s with no restart and no line about the C6's update. An update takes about 80 s over
 Bluetooth, against about 20 s over USB, from a PC at a 30 ms connection interval. Besides the lines
 above, the board prints:
 
@@ -660,7 +671,6 @@ above, the board prints:
 |-------------------------------------------------------------|---------------------------------------------------------------|
 | `the link dropped as the bridge restarts; reconnecting`     | The P4 is rebooting into the image, or its C6 is restarting   |
 | `the radio restarted on its bundled image`                  | The C6's update ended and the link came back                  |
-| `installed, and confirmed: it outlived its trial watchdog`  | The confirm's line was lost to a drop, and the P4 stayed up past its 30 s trial watchdog, which only a confirmed image does |
 | `did not report its scan stopped; updating anyway`          | The bridge did not answer the stop in 2 s                     |
 
 It fails, beside the cases above, when:
@@ -669,8 +679,8 @@ It fails, beside the cases above, when:
 - The bridge comes back on the life it had before the install: `never took the install, and keeps
   its image`. The link dropped before the P4 took the `Install`. Run `flash-bridge` again. A C6
   that restarts alone at that moment reads as a rollback instead.
-- The bridge does not come back within 180 s, or comes back on the new image with no confirm seen
-  by the end: `no confirm was seen over Bluetooth`, and the image rolls back unless a host confirms
+- The bridge does not come back within 180 s, or comes back on the new image still on trial at
+  the end: `no confirm was seen over Bluetooth`, and the image rolls back unless a host confirms
   it.
 - Nothing answers over Bluetooth: the same notice `status` gives ("When the Bluetooth link does not
   come up").

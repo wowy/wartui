@@ -37,8 +37,7 @@ use wartui_firmware::reboot;
 use wartui_proto::bus::{Board, UpdateState, UpdateStatus};
 use wartui_proto::heapless::Vec;
 use wartui_proto::link::{
-    BridgeToHost, HostOwner, IMAGE_CONFIRMED, IMAGE_NOT_CONFIRMED, LogStr, Trial,
-    UPDATE_STATUS_MAX, UpdateStatusBytes,
+    BridgeToHost, HostOwner, LogStr, Trial, UPDATE_STATUS_MAX, UpdateStatusBytes,
 };
 use wartui_proto::ota::Receiver;
 use wartui_proto::ota::image::DIGEST_LEN;
@@ -53,6 +52,14 @@ use crate::Shared;
 /// these, about 60 s, roll back an image no host confirms: the
 /// third boot rolls back as it starts ([`Ota::boot`]).
 pub const TRIAL_WATCHDOG: Duration = Duration::from_secs(30);
+
+/// The P4's [`BridgeToHost::Log`] after a host frame confirms its image on trial. A host reads
+/// the outcome from `Ready.trial`; the line is for the operator.
+const IMAGE_CONFIRMED: &str = "image confirmed by the host";
+
+/// The start of the P4's [`BridgeToHost::Error`] when confirming its image fails; the flash
+/// error follows after a colon.
+const IMAGE_NOT_CONFIRMED: &str = "could not confirm the image";
 
 /// Lines for the host held until the next announcement, since nothing reaches the host
 /// before its `Ready`: what the boot found, and the confirm.

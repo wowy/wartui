@@ -8,10 +8,11 @@
 //!
 //! **A `Ready` is either a new life or a second answer.** Two arrive on one connection for two
 //! different reasons, and the uptime separates them ([`is_a_new_life`]). One is a second answer to
-//! an `Identify` sent before the first came back: same life, and reporting it would look like a
-//! reconnect that never happened. The other is a new life under a held connection — a C6 that
-//! restarted, or a P4 that rebooted while the CH343 stayed on the bus — and that has to be
-//! reported, or the engine keeps the dead life's `BridgeInfo`.
+//! an `Identify`: same life, and reported as a repeat (`LinkEvent::Again`), since reporting it as
+//! a connection would look like a reconnect that never happened. An update reads its outcome from
+//! these. The other is a new life under a held connection — a C6 that restarted, or a P4 that
+//! rebooted while the CH343 stayed on the bus — and that has to be reported as a connection, or
+//! the engine keeps the dead life's `BridgeInfo`.
 //!
 //! **A connection reads the frozen core until a `Ready` says it can read more.** Each transport
 //! decodes in [`Gate::reads`]'s mode. Before the first `Ready`, and after one whose rest this host
@@ -34,9 +35,9 @@ use crate::BridgeInfo;
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Admitted {
-    /// A `Ready`. `fresh` is a new life, which is reported. Which `Ready` proves the board is
-    /// each transport's to say: the first on its connection, which a restart of the gate does not
-    /// move.
+    /// A `Ready`. `fresh` is a new life, reported as a connection; any other is reported as a
+    /// repeat. Which `Ready` proves the board is each transport's to say: the first on its
+    /// connection, which a restart of the gate does not move.
     Ready {
         /// The bridge as it announced itself.
         info: BridgeInfo,

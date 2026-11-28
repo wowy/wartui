@@ -394,6 +394,18 @@ fn ble_inbound_reports_disconnect_then_same_life_when_usb_takes_and_returns_brid
 }
 
 #[test]
+fn ble_inbound_reports_again_when_same_life_answers_twice() {
+    // An update polls `Identify` and reads each answer.
+    let mut inbound = Inbound::new(None);
+    let t0 = Instant::now();
+    inbound.feed(&frame(&ready(BRIDGE, 10_000)), t0);
+    let heard = inbound.feed(&frame(&ready(BRIDGE, 11_000)), t0 + Duration::from_secs(1));
+    assert!(!heard.contains(&Heard::Proved(BRIDGE)), "proved once per connection");
+    let again = events(heard);
+    assert!(matches!(&again[..], [LinkEvent::Again(core)] if core.uptime_ms == 11_000));
+}
+
+#[test]
 fn ble_inbound_refuses_bridge_when_it_shares_only_the_advertised_octets() {
     let other = [0x02, 0xF2, 0x62, 0x10, 0x44, 0xC0];
     let mut inbound = Inbound::new(Some(spec("02:00:5E:10:44:C0")));

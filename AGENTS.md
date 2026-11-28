@@ -177,7 +177,8 @@ the bottom one and a crate of its own.
   and WiGLE: each site's body and cutoff, the operator's consent, the send and the job followed)
   and `update` (the nodes and the bridge updated over the link: the app-only images and their
   checks, a release's image fetched against its `SHA256SUMS`, the node plan and its fleets, and
-  the bridge's update read across its reboot) and `position` (the position chain's tiers in
+  the bridge's update, stopped with `Abort` while it sends and read from `Ready` across its
+  reboot) and `position` (the position chain's tiers in
   their order, and whether the scan waits for a fix, for a desktop and a phone alike). It words
   nothing for the operator, and names no desktop I/O and no terminal.
 - **`crates/wartui-desktop`** — what only a desktop does, under those seams:
@@ -672,9 +673,12 @@ edit stops; follow the pointer before changing the rule.
   `firmware/p4-radio/src/last_panic.rs`;
   `firmware/p4-bridge/src/link.rs`, `relay`, and `src/main.rs`, `Shared::announce`
 - **Updates follow the link, and a failed one over Bluetooth is recovered over USB.**
-  `flash-bridge` and `ota` pick theirs as every command does (`link_for`). Over Bluetooth the P4's
-  reboot and its C6's update each drop the link, so `flash-bridge` reads its outcome across the
-  reconnects, and nothing resumes a partly sent image.
+  `flash-bridge` and `ota` pick theirs as every command does (`link_for`). `flash-bridge` reads
+  its outcome from the frozen `image` and `trial` of each `Ready` that answers its `Identify` polls,
+  never from a log line. Over Bluetooth the P4's reboot and its C6's update each drop the link, so
+  it reads them across the reconnects, and nothing resumes a partly sent image. An upload the host
+  gives up on before it is verified, the bridge's own image or the node image cache's, is ended
+  with `Abort` (`wartui_bridge::pace::abort`).
   → `crates/wartui-app/src/update/bridge.rs` `//!`
 - **The P4 pumps its planner after every input.** Each heartbeat, presence change, host command
   and tick is followed at once by pulling every record the core owes into its downlink. A

@@ -29,13 +29,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
 use wartui_app::ops;
 use wartui_app::settings::Link as Over;
-use wartui_app::update::bridge::{self, Failed, Line, Proof, Updated};
+use wartui_app::update::bridge::{self, Failed, Line, Updated};
 use wartui_app::update::image::{
     self as app_image, Chip, ImageError as AppImageError, ImageOf, has_node_image,
 };
@@ -120,15 +119,6 @@ pub enum Line {
     Fault(String),
     /// A `Log` message.
     Log(String),
-}
-
-/// How the bridge's new image is known to be confirmed.
-#[uniffi::remote(Enum)]
-pub enum Proof {
-    /// The P4's line said so.
-    Confirmed,
-    /// The line was lost, and the bridge outlived its trial watchdog.
-    OutlivedTrial,
 }
 
 /// Why an image was refused.
@@ -1040,12 +1030,13 @@ pub enum BridgeUpdateFailed {
     /// The bridge came back on neither image, or one it could not name.
     #[error("came back running another image")]
     OtherImage,
-    /// The bridge runs the new image, and says confirming it failed, in its words.
-    #[error("installed, not confirmed: {why}")]
-    NotConfirmed { why: String },
-    /// The bridge runs the new image, and no confirm was seen: within `secs` of its `Ready`, or
-    /// before the wait over Bluetooth ended (`None`).
-    #[error("installed, no confirm seen")]
+    /// The bridge runs the new image, and its announcement says confirming it failed. The
+    /// bridge's own line saying why arrives as [`BridgeUpdateProgress::Said`].
+    #[error("installed, not confirmed")]
+    NotConfirmed,
+    /// The bridge runs the new image, still on trial: `secs` after its first announcement, or
+    /// when the wait over Bluetooth ended (`None`).
+    #[error("installed, still on trial")]
     NoConfirm { secs: Option<u64> },
     /// Over Bluetooth, the wait ended with no new life judged.
     #[error("the bridge did not come back")]
@@ -1061,8 +1052,9 @@ pub enum BridgeUpdateFailed {
     #[error("the link is pinned to no bridge")]
     NotPinned,
     /// The stopper, or a phone that stopped awaiting, stopped it before
-    /// [`BridgeUpdateProgress::Installing`] was reported; from then a stop is not taken, and the
-    /// call runs to its outcome. The bridge keeps the image it runs.
+    /// [`BridgeUpdateProgress::Installing`] was reported, and the update's session on the bridge
+    /// was ended; from then a stop is not taken, and the call runs to its outcome. The bridge
+    /// keeps the image it runs.
     #[error("stopped")]
     Stopped,
 }
@@ -1093,7 +1085,8 @@ impl From<Failed> for BridgeUpdateFailed {
             Failed::NeverTookInstall => Self::NeverTookInstall,
             Failed::RolledBack => Self::RolledBack,
             Failed::OtherImage => Self::OtherImage,
-            Failed::NotConfirmed { why } => Self::NotConfirmed { why },
+            Failed::Stopped => Self::Stopped,
+            Failed::NotConfirmed => Self::NotConfirmed,
             Failed::NoConfirm { secs } => Self::NoConfirm { secs },
             Failed::NotBack => Self::NotBack,
         }
@@ -1111,8 +1104,8 @@ pub enum BridgeUpdateProgress {
     Installing,
     /// Over Bluetooth, the link dropped as the bridge restarts. Said once.
     LinkDropped,
-    /// The new image is running and confirmed, known this way.
-    Confirmed { proof: Proof },
+    /// The new image is running, and its announcement says it is confirmed.
+    Confirmed,
     /// The radio restarted on its bundled image.
     RadioRestarted,
     /// The radio's update is still running when the wait for it ends.
@@ -1128,7 +1121,7 @@ impl From<bridge::Progress> for BridgeUpdateProgress {
             bridge::Progress::Sending { percent } => Self::Sending { percent },
             bridge::Progress::Installing => Self::Installing,
             bridge::Progress::LinkDropped => Self::LinkDropped,
-            bridge::Progress::Confirmed(proof) => Self::Confirmed { proof },
+            bridge::Progress::Confirmed => Self::Confirmed,
             bridge::Progress::RadioRestarted => Self::RadioRestarted,
             bridge::Progress::RadioStillUpdating => Self::RadioStillUpdating,
             bridge::Progress::Line(line) => Self::Said { line },
@@ -1201,12 +1194,11 @@ impl Link {
     /// Needs the bridge's announcement (`ready`), which names the image it runs. The link keeps
     /// the latest announcement it reads, so after an install it names the new image.
     ///
-    /// `stopper`, or a phone that stops awaiting, abandons the update while the image is sent:
-    /// the bridge keeps the image it runs, and holds the partial image's session until the next
-    /// update or until the link goes, since no op ends one. From
-    /// [`BridgeUpdateProgress::Installing`] on, the bridge boots the new image and only the
-    /// update's polls confirm it, so a stop is not taken and the call runs to its outcome; a phone
-    /// that stopped awaiting has the link back once it ends.
+    /// `stopper`, or a phone that stops awaiting, stops the update while the image is sent: it
+    /// ends the partial image's session on the bridge with `Abort`, and the bridge keeps the image
+    /// it runs. From [`BridgeUpdateProgress::Installing`] on, the bridge boots the new image and
+    /// only the update's polls confirm it, so a stop is not taken and the call runs to its
+    /// outcome; a phone that stopped awaiting has the link back once it ends.
     ///
     /// A phone has no USB to fall back on, so a bridge update that fails over Bluetooth is
     /// recovered from a computer; the app says so before it starts. It can run several minutes
@@ -1320,45 +1312,20 @@ async fn update_bridge(
     };
     // The simulator stands in for a bridge on USB, as a capture over it does.
     let over = if inner.is_simulated() { Over::Usb } else { Over::Bluetooth };
-    let installing = AtomicBool::new(false);
-    let flag = &installing;
     let mut last = None;
     let say = move |progress: bridge::Progress| {
         if !passed_on(&mut last, &progress) {
             return;
-        }
-        if progress == bridge::Progress::Installing {
-            flag.store(true, Ordering::Relaxed);
         }
         if let Some(listener) = &listener {
             // A listener that fails is the phone's to notice; the update goes on.
             let _ = listener.progress(progress.into());
         }
     };
-    let updating = bridge::update(&mut handle, over, running, &image.image, say);
-    let updated = unless_stopped(updating, halted(stopper, dropped), &installing).await;
+    let stop = halted(stopper, dropped);
+    let updated = bridge::update(&mut handle, over, running, &image.image, stop, say).await;
     inner.give_back(handle);
-    match updated {
-        Some(updated) => updated.map(BridgeUpdated::from).map_err(BridgeUpdateFailed::from),
-        None => Err(BridgeUpdateFailed::Stopped),
-    }
-}
-
-/// `update`'s outcome, or `None` when `stop` resolves while `installing` is clear, which drops
-/// the update. `bridge::update` says `Installing` in the poll that queues `Install`, so the flag
-/// is exact: once it is set the bridge boots the new image, which only the update's polls
-/// confirm, and the update runs to its outcome whatever `stop` does.
-async fn unless_stopped<T>(
-    update: impl Future<Output = T>,
-    stop: impl Future<Output = ()>,
-    installing: &AtomicBool,
-) -> Option<T> {
-    tokio::pin!(update);
-    tokio::select! {
-        updated = &mut update => return Some(updated),
-        () = stop => {}
-    }
-    if installing.load(Ordering::Relaxed) { Some(update.await) } else { None }
+    updated.map(BridgeUpdated::from).map_err(BridgeUpdateFailed::from)
 }
 
 /// Whether `progress` goes on to the phone's listener: a `Sending` only when its percent differs
@@ -1373,45 +1340,9 @@ fn passed_on(last: &mut Option<u8>, progress: &bridge::Progress) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-
-    use tokio::sync::oneshot;
     use wartui_app::update::bridge::Progress;
 
-    use super::{passed_on, unless_stopped};
-
-    #[tokio::test]
-    async fn unless_stopped_runs_to_the_outcome_when_stopped_after_installing() {
-        let installing = AtomicBool::new(false);
-        let (said, heard) = oneshot::channel();
-        let update = async {
-            // As `say(Installing)` does, in the poll that queues `Install`.
-            installing.store(true, Ordering::Relaxed);
-            let _ = said.send(());
-            // The reboot and the polls that confirm it.
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            "installed"
-        };
-        let stop = async {
-            let _ = heard.await;
-        };
-        assert_eq!(unless_stopped(update, stop, &installing).await, Some("installed"));
-    }
-
-    #[tokio::test]
-    async fn unless_stopped_drops_the_update_when_stopped_while_sending() {
-        let installing = AtomicBool::new(false);
-        let (said, heard) = oneshot::channel();
-        let update = async {
-            let _ = said.send(());
-            std::future::pending::<&str>().await
-        };
-        let stop = async {
-            let _ = heard.await;
-        };
-        assert_eq!(unless_stopped(update, stop, &installing).await, None);
-    }
+    use super::passed_on;
 
     #[test]
     fn passed_on_drops_a_sending_when_its_percent_is_the_last_passed_on() {

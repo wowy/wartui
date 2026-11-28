@@ -160,8 +160,11 @@ the P4 cannot read is skipped. The P4 drops an update session when its host lets
 Bluetooth link that drops mid-transfer costs the transfer. Its reboot resets the C6, which drops a
 Bluetooth link too, and `flash-bridge` reads the outcome across the reconnects.
 
-**The first host frame after the C6's hello confirms the image.** `flash-bridge` polls every
-second while the P4 reboots, so a P4 that comes back and hears `wartui` keeps its image.
+**The first host frame after the C6's hello confirms the image.** `flash-bridge` sends an
+`Identify` every second while the P4 reboots, so a P4 that comes back and hears `wartui` keeps its
+image. The `Ready` that answers says how it went, in its frozen `trial` field: settled, on trial,
+or on trial with the confirm failed. The host reads the outcome from that and from `Ready.image`,
+not from the `image confirmed by the host` line the P4 also sends.
 
 **A trial boot arms the RTC watchdog for 30 s.** Confirming disarms it. A hung image is reset by
 it, and the third unconfirmed boot rolls back to the image the P4 ran before. A trial P4 left

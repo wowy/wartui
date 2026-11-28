@@ -682,9 +682,12 @@ impl Inbound {
                             self.proved = true;
                             heard.push(Heard::Proved(info.mac));
                         }
-                        if fresh {
-                            heard.push(Heard::Event(LinkEvent::Connected(info)));
-                        }
+                        let event = if fresh {
+                            LinkEvent::Connected(info)
+                        } else {
+                            LinkEvent::Again(info.core())
+                        };
+                        heard.push(Heard::Event(event));
                     }
                     // A bridge whose messages this host cannot read: reported as a frame it
                     // cannot read.

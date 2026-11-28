@@ -391,7 +391,7 @@ fn served_by(event: &LinkEvent) -> Served<'_> {
             ..
         } => Served::Waiting,
         LinkEvent::Disconnected { reason, .. } => Served::Failed(reason),
-        LinkEvent::Message(_) | LinkEvent::Garbled(_) => Served::Waiting,
+        LinkEvent::Again(_) | LinkEvent::Message(_) | LinkEvent::Garbled(_) => Served::Waiting,
     }
 }
 

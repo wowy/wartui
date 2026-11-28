@@ -1177,14 +1177,15 @@ fn read_frames<R: Read>(
                         if first {
                             memory.remember_on(info.mac, state.serial.clone());
                         }
-                        // A second answer to an `Identify` sent before the first came back
-                        // is the same life. A new life under a held connection is a C6 that
-                        // restarted, or a P4 that rebooted and was asked again by the next
-                        // host frame, while the CH343 stayed on the bus.
-                        if !fresh {
-                            continue;
+                        // Another answer to an `Identify` is the same life, reported as a
+                        // repeat. A new life under a held connection is a C6 that restarted,
+                        // or a P4 that rebooted and was asked again by the next host frame,
+                        // while the CH343 stayed on the bus.
+                        if fresh {
+                            LinkEvent::Connected(info)
+                        } else {
+                            LinkEvent::Again(info.core())
                         }
-                        LinkEvent::Connected(info)
                     }
                     // A bridge whose messages this host cannot read: reported as a frame it
                     // cannot read.
@@ -1730,6 +1731,23 @@ mod tests {
             })
             .collect();
         assert_eq!(lives, [50_000, 120]);
+    }
+
+    #[test]
+    fn serial_reader_reports_again_when_same_life_answers_twice() {
+        // An update polls `Identify` and reads each answer.
+        let up = |uptime_ms| up(BRIDGE_VERSION, [0x02, 0, 0x5E, 0x10, 0x44, 0xC0], uptime_ms);
+        let mut bytes = frame(&up(50_000));
+        bytes.extend(frame(&up(50_010)));
+
+        let (events, mut received) = mpsc::channel(8);
+        let state = Attempt::default();
+        read_loop(Bytes(std::io::Cursor::new(bytes)), &events, &state, &BridgeMemory::none());
+
+        assert!(matches!(received.try_recv(), Ok(LinkEvent::Connected(_))));
+        let Ok(LinkEvent::Again(core)) = received.try_recv() else { panic!("not a repeat") };
+        assert_eq!(core.uptime_ms, 50_010);
+        assert!(received.try_recv().is_err());
     }
 
     /// A port that hands out its bytes, then times out, and keeps what is written to it.

@@ -286,6 +286,8 @@ impl FleetEngine {
                 self.reset_arrivals();
             }
             Event::Link(LinkEvent::Garbled(_)) => self.counters.garbled += 1,
+            // The same life answering an `Identify` again: nothing the engine follows changed.
+            Event::Link(LinkEvent::Again(_)) => {}
             Event::Link(LinkEvent::Message(msg)) => self.on_message(&msg, now, &mut batch),
         }
         batch

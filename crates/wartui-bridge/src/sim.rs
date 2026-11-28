@@ -89,7 +89,7 @@ use wartui_proto::radio_link::update::{Op, Received, receive};
 use wartui_proto::reset::ResetCause;
 use wartui_proto::sd::format;
 
-use crate::{BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
+use crate::{BridgeCore, BridgeInfo, LinkEvent, LinkHandle, TransportError, link_pair};
 
 mod wire;
 pub use wire::{WireDown, WireSim, WireUp};
@@ -626,6 +626,8 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
         version: BRIDGE_VERSION,
         trial: Trial::Settled,
     };
+    // What it answers each later `Identify` with, its uptime counted from its start.
+    let core = info.core();
     if plumbing.events.send(LinkEvent::Connected(info)).await.is_err() {
         return;
     }
@@ -727,9 +729,17 @@ async fn run_bridge(mut plumbing: crate::LinkPlumbing, bridge: Bridge) {
                 }
                 break 'handled;
             }
+            if let HostToBridge::Identify = cmd {
+                // The same life answering again, as the real bridge's `Ready` reads through the
+                // gate.
+                let again = BridgeCore { uptime_ms: elapsed_ms(started), ..core };
+                if plumbing.events.send(LinkEvent::Again(again)).await.is_err() {
+                    return;
+                }
+                break 'handled;
+            }
             let reply = match cmd {
-                // The real bridge replies with `Ready`, but `Connected` has already
-                // gone out above and a host counting connections would be confused.
+                // Answered above.
                 HostToBridge::Identify => None,
                 // No receiver on its GPS port to write to.
                 HostToBridge::GpsWrite { .. } => None,
@@ -1743,6 +1753,25 @@ mod tests {
             .expect("starting the simulator");
         while !matches!(link.recv().await, Some(LinkEvent::Connected(_))) {}
         link
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sim_answers_identify_with_again_when_asked() {
+        let mut link = started().await;
+        let first = link.reached().copied().expect("the announcement's core");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        link.send_bulk(HostToBridge::Identify).expect("queued");
+        let again = loop {
+            match link.recv().await {
+                Some(LinkEvent::Again(core)) => break core,
+                Some(LinkEvent::Connected(_)) => panic!("a repeat is not a new life"),
+                Some(_) => {}
+                None => panic!("the simulator stopped"),
+            }
+        };
+        assert_eq!(again.mac, first.mac);
+        assert!(again.uptime_ms >= 2_000, "the same life, later: {}", again.uptime_ms);
+        assert_eq!(link.reached(), Some(&again));
     }
 
     fn cache_op(link: &LinkHandle, op: &Op<'_>) {

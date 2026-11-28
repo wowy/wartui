@@ -8,9 +8,12 @@
 //!
 //! **The link is opened and its `Ready` waited for here**, and over USB the bridge that answers
 //! must be the one the probe chose. The port is opened by path: the probe that chose it has
-//! already asked, and the reboot leaves the CH343 where it is. A ctrl-c stops the update once the
-//! link is open, and `main` closes the link. The download or build before it blocks the task, so
-//! it runs with no ctrl-c handler, and a ctrl-c there ends the process.
+//! already asked, and the reboot leaves the CH343 where it is. A ctrl-c while the link opens ends
+//! the command. One while the image is sent is the update's stop: it ends the bridge's update
+//! session, and the bridge keeps its image. From the install on the update runs to its outcome,
+//! since only the host's frames confirm the new image, and a second ctrl-c exits without it.
+//! `main` closes the link. The download or build before it blocks the task, so it runs with no
+//! ctrl-c handler, and a ctrl-c there ends the process.
 //!
 //! A failed update over Bluetooth is recovered over USB, by running `flash-bridge` there.
 //!
@@ -21,10 +24,11 @@
 //! arrived garbled.
 
 use std::io::{IsTerminal, Write};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use wartui_app::update::bridge::{self, Failed, Line, Progress, Proof, Updated};
+use wartui_app::update::bridge::{self, Failed, Line, Progress, Updated};
 use wartui_app::update::image::{BridgeImage, Chip};
 use wartui_app::update::release;
 use wartui_bridge::ports::PortCandidate;
@@ -105,12 +109,14 @@ pub(super) async fn run(args: &Args, target: Target) -> Result<()> {
     }
     let path = obtain(&P4_BRIDGE_APP, &source)?;
     let image = app::checked(&path, BridgeImage::parse(read(&path)?))?;
-    crate::interruptible(update_over_link(target, label, &image)).await
+    let (link, over, info, label) = crate::interruptible(open(target, label)).await?;
+    update_over_link(link, over, &info, &label, &image).await
 }
 
-/// Send `image` to the bridge `target` names, from opening its link to the outcome.
-async fn update_over_link(target: Target, label: String, image: &BridgeImage) -> Result<()> {
-    let (mut link, over, info, label) = match target {
+/// Open the link to the bridge `target` names and wait for its `Ready`: the link, which it is,
+/// the bridge's announcement, and the label the lines name it by.
+async fn open(target: Target, label: String) -> Result<(LinkHandle, Link, BridgeInfo, String)> {
+    Ok(match target {
         Target::Usb { board, expected } => {
             let (link, info) = open_usb(&label, &board.path).await?;
             ensure!(info.mac == expected, "{label} answered with another address");
@@ -122,16 +128,48 @@ async fn update_over_link(target: Target, label: String, image: &BridgeImage) ->
             let label = mac::short(&info.mac).to_string();
             (link, Link::Bluetooth, info, label)
         }
+    })
+}
+
+/// Send `image` to the bridge `info` announced on `link`, over `over`, to the outcome. The first
+/// ctrl-c is the update's stop, and a second exits.
+async fn update_over_link(
+    mut link: LinkHandle,
+    over: Link,
+    info: &BridgeInfo,
+    label: &str,
+    image: &BridgeImage,
+) -> Result<()> {
+    let progress = Mutex::new(ProgressLine::new(label.to_owned()));
+    let line = || progress.lock().unwrap_or_else(PoisonError::into_inner);
+    let (stopping, stopped) = tokio::sync::oneshot::channel::<()>();
+    let stop = async {
+        let _ = stopped.await;
     };
-    let mut progress = ProgressLine::new(label.clone());
-    let updated = bridge::update(&mut link, over, info.image, image, |said| progress.take(said));
-    match updated.await {
+    let updated =
+        bridge::update(&mut link, over, info.image, image, stop, |said| line().take(said));
+    tokio::pin!(updated);
+    let mut stopping = Some(stopping);
+    let updated = loop {
+        tokio::select! {
+            updated = &mut updated => break updated,
+            // A handler that would not install is no ctrl-c: the arm is disabled, not fired.
+            Ok(()) = tokio::signal::ctrl_c() => {
+                let Some(stopping) = stopping.take() else {
+                    return Err(crate::Interrupted.into());
+                };
+                let _ = stopping.send(());
+                line().stopping();
+            }
+        }
+    };
+    match updated {
         Ok(Updated::AlreadyCurrent) => {
             println!("{label:<6} already runs this image");
             Ok(())
         }
         Ok(Updated::Installed) => Ok(()),
-        Err(failed) => Err(failed_error(&label, failed)),
+        Err(failed) => Err(failed_error(label, failed)),
     }
 }
 
@@ -228,6 +266,10 @@ fn failed_error(label: &str, failed: Failed) -> anyhow::Error {
         Failed::PortStalled { percent } => anyhow!(port_stall_text(percent)),
         Failed::Sender { failure, image_known } => anyhow!(failure_text(failure, image_known)),
         Failed::Queue(error) => anyhow::Error::new(error).context("queueing an update op"),
+        Failed::Stopped => anyhow!(
+            "stopped before the install; {label} keeps its image, and flash-bridge can be run \
+             again"
+        ),
         Failed::NoComeBack { over: Link::Usb, secs } => anyhow!(
             "the bridge did not come back within {secs} s of the install; check its CH343 log"
         ),
@@ -240,8 +282,8 @@ fn failed_error(label: &str, failed: Failed) -> anyhow::Error {
         }
         Failed::RolledBack => anyhow!("{label} did not boot the new image; rolled back"),
         Failed::OtherImage => anyhow!("{label} came back running another image"),
-        Failed::NotConfirmed { why } => {
-            anyhow!("{label} installed the new image, but {why}. {ROLLS_BACK}")
+        Failed::NotConfirmed => {
+            anyhow!("{label} installed the new image, but could not confirm it. {ROLLS_BACK}")
         }
         Failed::NoConfirm { secs: Some(secs) } => anyhow!(
             "{label} installed the new image, but no confirm was seen within {secs} s. \
@@ -251,14 +293,6 @@ fn failed_error(label: &str, failed: Failed) -> anyhow::Error {
             "{label} installed the new image, but no confirm was seen over Bluetooth. {ROLLS_BACK}"
         ),
         Failed::NotBack => anyhow!("{label} did not come back"),
-    }
-}
-
-/// How a new image is known to be confirmed, as the operator reads it.
-fn proof_text(proof: Proof) -> &'static str {
-    match proof {
-        Proof::Confirmed => "installed and confirmed",
-        Proof::OutlivedTrial => "installed, and confirmed: it outlived its trial watchdog",
     }
 }
 
@@ -307,11 +341,22 @@ struct ProgressLine {
     tty: bool,
     /// The last percentage drawn, and a line is half-drawn on the terminal.
     drawn: Option<u8>,
+    /// `Install` is out, so a stop is not taken.
+    installing: bool,
 }
 
 impl ProgressLine {
     fn new(board: String) -> Self {
-        Self { board, tty: std::io::stdout().is_terminal(), drawn: None }
+        Self { board, tty: std::io::stdout().is_terminal(), drawn: None, installing: false }
+    }
+
+    /// The operator pressed ctrl-c.
+    fn stopping(&mut self) {
+        if self.installing {
+            self.say("installing, so the update runs to its outcome; ctrl-c again exits now");
+        } else {
+            self.say("stopping; ending the bridge's update session");
+        }
     }
 
     fn show(&mut self, percent: u8) {
@@ -349,11 +394,14 @@ impl ProgressLine {
                 self.say("did not report its scan stopped; updating anyway")
             }
             Progress::Sending { percent } => self.show(percent),
-            Progress::Installing => self.say("installing; waiting for the bridge to come back"),
+            Progress::Installing => {
+                self.installing = true;
+                self.say("installing; waiting for the bridge to come back");
+            }
             Progress::LinkDropped => {
                 self.say("the link dropped as the bridge restarts; reconnecting")
             }
-            Progress::Confirmed(proof) => self.say(proof_text(proof)),
+            Progress::Confirmed => self.say("installed and confirmed"),
             Progress::RadioRestarted => self.say("the radio restarted on its bundled image"),
             Progress::RadioStillUpdating => {
                 self.say("the radio's update is still running; `wartui status` shows its end");
@@ -499,18 +547,16 @@ mod tests {
     }
 
     #[test]
-    fn flash_p4_words_confirm_when_image_is_confirmed() {
-        assert_eq!(proof_text(Proof::Confirmed), "installed and confirmed");
-        let text = proof_text(Proof::OutlivedTrial);
-        assert_eq!(text, "installed, and confirmed: it outlived its trial watchdog");
+    fn flash_p4_words_failed_confirm_when_ready_says_confirm_failed() {
+        let text = failed_error("71:F4", Failed::NotConfirmed).to_string();
+        assert!(text.contains("could not confirm it") && text.contains("rolls back"), "{text}");
+        assert!(text.starts_with("71:F4 installed the new image, but "), "{text}");
     }
 
     #[test]
-    fn flash_p4_words_failed_confirm_when_bridge_reports_error() {
-        let line = "the image was not confirmed: flash write failed".to_owned();
-        let text = failed_error("71:F4", Failed::NotConfirmed { why: line.clone() }).to_string();
-        assert!(text.contains(&line) && text.contains("rolls back"), "{text}");
-        assert!(text.starts_with("71:F4 installed the new image, but "), "{text}");
+    fn flash_p4_says_image_kept_when_stopped_while_sending() {
+        let text = failed_error("71:F4", Failed::Stopped).to_string();
+        assert!(text.starts_with("stopped before the install; 71:F4 keeps its image"), "{text}");
     }
 
     #[test]

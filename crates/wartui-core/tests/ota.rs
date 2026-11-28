@@ -8,18 +8,20 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use wartui_bridge::sim::{SimConfig, SimTransport};
-use wartui_bridge::{LinkEvent, LinkHandle};
+use wartui_bridge::{LinkEvent, LinkHandle, LinkPlumbing, link_pair};
 use wartui_core::engine::Now;
 use wartui_core::ota::{
     BEGIN_TIMEOUT, CONFIRM_TIMEOUT, Failure, Ids, MAX_RESTARTS, MAX_SEND_FAILURES,
     MAX_STATUS_TIMEOUTS, OtaEvent, OtaImage, OtaSession, Outcome, Phase, REBOOT_GRACE,
 };
-use wartui_core::runtime::{FleetError, drive_fleet, now};
+use wartui_core::runtime::{FleetError, FleetReport, drive_fleet, now};
 use wartui_proto::bus::{
     Board, Capabilities, DieTemp, DownMsg, DownType, Heartbeat, MAX_SLOTS, NODE_VERSION, NodeBus,
     Slot, UPDATE_CHUNK, UPDATE_CHUNK_MAX, UpType, UpdateState, UpdateStatus, Vdd, Version,
 };
-use wartui_proto::link::{BridgeToHost, HostToBridge, cache_chunk_body, image_tag};
+use wartui_proto::link::{
+    BridgeToHost, HostToBridge, UPDATE_STATUS_MAX, UpdateStatusBytes, cache_chunk_body, image_tag,
+};
 use wartui_proto::mac::Mac;
 use wartui_proto::ota::{Receiver, SECTOR, SectorSink};
 use wartui_proto::radio_link::update;
@@ -1258,6 +1260,120 @@ async fn drive_fleet_fails_upload_when_link_stops_taking_commands() {
         drive_fleet(&mut link, &mut sessions, Some(&image), std::future::pending(), |_| {}).await;
     assert_eq!(ended, Err(FleetError::Upload(update::Failure::Silent)));
     assert!(start.elapsed() < Duration::from_secs(30), "failed after {:?}", start.elapsed());
+}
+
+/// Every op the scripted cache took, by its code, and whether each `Abort` was answered `Idle`.
+type CacheLog = Arc<Mutex<Vec<(u8, Option<UpdateState>)>>>;
+
+/// A P4 at the bridge's end of the link that takes the node image upload into a cache of
+/// `sectors` sectors as its receiver does, `per_command` per command, and counts every other
+/// command done unanswered.
+fn scripted_cache(mut plumbing: LinkPlumbing, sectors: usize, per_command: Duration) -> CacheLog {
+    let log = CacheLog::default();
+    let taken = Arc::clone(&log);
+    tokio::spawn(async move {
+        let mut receiver = Box::new(Receiver::new(BOARD));
+        let mut cache = Cache(vec![0xFF; sectors * SECTOR]);
+        while let Some(cmd) = plumbing.commands.recv().await {
+            tokio::time::sleep(per_command).await;
+            plumbing.commands.done(1);
+            let HostToBridge::CacheImage(bytes) = cmd else { continue };
+            let op = update::Op::decode(&bytes).expect("an op");
+            let code = bytes[0];
+            let status = match update::receive(&mut receiver, op, Some(&mut cache), false) {
+                update::Received::Status(status) => status,
+                update::Received::Install(_) => None,
+            };
+            taken.lock().unwrap().push((code, status.map(|status| status.state)));
+            if let Some(status) = status {
+                let mut buf = [0u8; UPDATE_STATUS_MAX];
+                let len = update::Op::Status(status).encode(&mut buf);
+                let up =
+                    BridgeToHost::CacheImage(UpdateStatusBytes::from_slice(&buf[..len]).unwrap());
+                if plumbing.events.send(LinkEvent::Message(up)).await.is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    log
+}
+
+/// The scripted P4's node image cache.
+struct Cache(Vec<u8>);
+
+impl SectorSink for Cache {
+    type Error = ();
+
+    fn capacity(&self) -> u32 {
+        u32::try_from(self.0.len()).unwrap_or(u32::MAX)
+    }
+
+    fn erase(&mut self, offset: u32, len: u32) -> Result<(), ()> {
+        let (at, len) = (offset as usize, len as usize);
+        self.0[at..at + len].fill(0xFF);
+        Ok(())
+    }
+
+    fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), ()> {
+        let at = offset as usize;
+        self.0[at..at + data.len()].copy_from_slice(data);
+        Ok(())
+    }
+}
+
+/// The op code of `Abort` (`radio_link::update`).
+const ABORT: u8 = 6;
+
+/// Drive one node's update against [`scripted_cache`] until `stop`, and what the cache took,
+/// with whether the upload was verified.
+async fn drive_against_cache(
+    sectors: usize,
+    stop: impl std::future::Future<Output = ()>,
+) -> (Result<Vec<Outcome>, FleetError>, CacheLog, bool) {
+    let (mut link, plumbing) = link_pair();
+    let log = scripted_cache(plumbing, sectors, Duration::from_millis(10));
+    let image = image(NEW);
+    let mut sessions = [OtaSession::new(NODE, OLD, &image, SESSION, Ids::of(0, 1), now())];
+    let mut cached = false;
+    let ended = drive_fleet(&mut link, &mut sessions, Some(&image), stop, |report| {
+        cached |= matches!(report, FleetReport::Cached(_));
+    })
+    .await;
+    (ended, log, cached)
+}
+
+fn aborts(log: &CacheLog) -> Vec<Option<UpdateState>> {
+    let log = log.lock().unwrap();
+    log.iter().filter(|(code, _)| *code == ABORT).map(|(_, state)| *state).collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_fleet_sends_cache_abort_when_stopped_mid_upload() {
+    // Each op takes 10 ms, so the upload is a sector or so in at the stop.
+    let stop = tokio::time::sleep(Duration::from_millis(100));
+    let (ended, log, cached) = drive_against_cache(64, stop).await;
+    assert_eq!(ended, Ok(vec![Outcome::Failed(Failure::Canceled)]));
+    assert!(!cached, "stopped before the cache verified the image");
+    assert_eq!(aborts(&log), [Some(UpdateState::Idle)], "one abort, answered");
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_fleet_sends_cache_abort_when_upload_fails() {
+    // A cache too small for the image refuses its `Begin`.
+    let (ended, log, cached) = drive_against_cache(1, std::future::pending()).await;
+    assert!(matches!(ended, Err(FleetError::Upload(update::Failure::Refused(_)))), "{ended:?}");
+    assert!(!cached);
+    assert_eq!(aborts(&log), [Some(UpdateState::Idle)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn drive_fleet_sends_no_abort_when_stopped_after_cache_verified() {
+    // The node never heartbeats, so its session waits until the stop.
+    let stop = tokio::time::sleep(Duration::from_secs(5));
+    let (_, log, cached) = drive_against_cache(64, stop).await;
+    assert!(cached, "the cache verified the image before the stop");
+    assert!(aborts(&log).is_empty(), "the nodes are fed from the verified image");
 }
 
 #[test]

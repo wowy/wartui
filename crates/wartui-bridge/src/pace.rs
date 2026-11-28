@@ -24,13 +24,21 @@
 //! [`STALL_OPS`] queued in that state, an op is dropped as a refused one is: the sender counts it
 //! sent.
 //!
+//! **A session the host gives up on is ended with `Abort`** ([`abort`]), shared by the bridge's
+//! own update and the node image upload. The bridge answers it with `Idle`, and that wait is
+//! timed from the write too, so an `Abort` queued behind a slow Bluetooth write still counts as
+//! answered. A bridge that does not answer is no error: its session ends anyway when the host
+//! goes or the next `Begin` replaces it.
+//!
 //! [`REPLY_WAIT_MS`]: wartui_proto::radio_link::update::REPLY_WAIT_MS
 
-use wartui_proto::bus::UpdateStatus;
-use wartui_proto::link::{HostToBridge, UpdateOp};
-use wartui_proto::radio_link::update::{OP_MAX, Sender, Stage};
+use std::time::Duration;
 
-use crate::{LinkHandle, SendError};
+use wartui_proto::bus::{UpdateState, UpdateStatus};
+use wartui_proto::link::{BridgeToHost, HostToBridge, UpdateOp};
+use wartui_proto::radio_link::update::{OP_MAX, Op, REPLY_WAIT_MS, Sender, Stage};
+
+use crate::{LinkEvent, LinkHandle, SendError};
 
 /// How long the last op may go unwritten before the link counts as stalled: twice the Bluetooth
 /// transport's bound on one write (`ble::WRITE_WITHIN`, 5 s), so a write it still waits on never
@@ -124,6 +132,12 @@ impl<'a> PacedSender<'a> {
         self.owed.is_some_and(|owed| owed.stalled.is_some())
     }
 
+    /// The session its ops name ([`Sender::session`]).
+    #[must_use]
+    pub fn session(&self) -> u8 {
+        self.sender.session()
+    }
+
     /// Take a status from the receiver ([`Sender::on_status`]).
     pub fn on_status(&mut self, status: &UpdateStatus) {
         self.sender.on_status(status);
@@ -145,6 +159,63 @@ impl<'a> PacedSender<'a> {
     #[must_use]
     pub fn percent(&self) -> u8 {
         self.sender.percent()
+    }
+}
+
+/// The status an encoded op carries, if it is one: what an `abort` caller's extractor reads out
+/// of its own message.
+#[must_use]
+pub fn status_in(bytes: &[u8]) -> Option<UpdateStatus> {
+    match Op::decode(bytes)? {
+        Op::Status(status) => Some(status),
+        _ => None,
+    }
+}
+
+/// End `session` with an `Abort`, which `wrap` makes a command, and wait for the bridge's `Idle`
+/// for it, which `status` reads out of a message. The wait is [`REPLY_WAIT_MS`] from the link
+/// writing the op, and at most [`STALL_MS`] for the write. Every other event that arrives
+/// meanwhile is dropped: the caller is stopping.
+///
+/// Returns whether the `Idle` arrived. A bridge that does not answer is not an error.
+pub async fn abort(
+    link: &mut LinkHandle,
+    session: u8,
+    wrap: impl Fn(UpdateOp) -> HostToBridge,
+    status: impl Fn(&BridgeToHost) -> Option<UpdateStatus>,
+) -> bool {
+    let mut buf = [0u8; OP_MAX];
+    let len = Op::Abort { session }.encode(&mut buf);
+    let op = UpdateOp::from_slice(&buf[..len]).expect("an op fits OP_MAX");
+    if link.send_urgent(wrap(op)).is_err() {
+        return false;
+    }
+    let queued = link.queued();
+    let mut written = link.written();
+    let write_by = tokio::time::Instant::now() + Duration::from_millis(STALL_MS);
+    // When the answer is due, once the link has written the op.
+    let mut reply: Option<tokio::time::Instant> = None;
+    loop {
+        if reply.is_none() && link.written_count() >= queued {
+            reply = Some(tokio::time::Instant::now() + Duration::from_millis(REPLY_WAIT_MS));
+        }
+        let until = reply.unwrap_or(write_by);
+        tokio::select! {
+            () = tokio::time::sleep_until(until) => return false,
+            () = written.changed(), if reply.is_none() => {}
+            event = link.recv() => match event {
+                Some(LinkEvent::Message(message)) => {
+                    let idle = status(&message).is_some_and(|status| {
+                        status.session == session && status.state == UpdateState::Idle
+                    });
+                    if idle {
+                        return true;
+                    }
+                }
+                Some(_) => {}
+                None => return false,
+            },
+        }
     }
 }
 
@@ -448,6 +519,56 @@ mod tests {
         let mut paced = PacedSender::new(Sender::new(&image, sha256, &DIGEST));
         drive(&mut link, &mut paced).await.expect("the update installs");
         assert!(!paced.is_stalled());
+    }
+
+    /// The cache's or the update's status, as `abort`'s callers read it.
+    fn update_status(message: &BridgeToHost) -> Option<UpdateStatus> {
+        match message {
+            BridgeToHost::Update(bytes) => status_in(bytes),
+            _ => None,
+        }
+    }
+
+    /// Abort session 7 over a transport taking `per_command` per command, and how long it took.
+    async fn abort_over(per_command: Duration, fate: Fate) -> (bool, Duration, Log) {
+        let (mut link, plumbing) = link_pair();
+        let log = transport(plumbing, per_command, move |_| fate);
+        let start = Instant::now();
+        let answered = abort(&mut link, 7, HostToBridge::Update, update_status).await;
+        (answered, start.elapsed(), log)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pace_abort_returns_true_when_bridge_answers_idle() {
+        let (answered, _, log) = abort_over(Duration::from_millis(10), Fate::Write).await;
+        assert!(answered);
+        assert_eq!(log.lock().unwrap()[0].0, Sent::Abort);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pace_abort_returns_false_when_no_idle_arrives_within_reply_wait() {
+        let per_command = Duration::from_millis(10);
+        let (answered, took, _) = abort_over(per_command, Fate::LoseStatus).await;
+        assert!(!answered);
+        assert_eq!(took, per_command + Duration::from_millis(REPLY_WAIT_MS));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pace_abort_waits_from_the_write_when_link_is_slow() {
+        // Over Bluetooth a command can sit queued past the reply wait: timed from the queue, the
+        // `Idle` would arrive after the wait gave up.
+        let per_command = Duration::from_millis(REPLY_WAIT_MS + 200);
+        let (answered, took, _) = abort_over(per_command, Fate::Write).await;
+        assert!(answered);
+        assert!(took > Duration::from_millis(REPLY_WAIT_MS), "{took:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pace_abort_gives_up_when_link_never_writes() {
+        let stall = Fate::Stall(Duration::from_secs(3_600));
+        let (answered, took, _) = abort_over(Duration::from_millis(10), stall).await;
+        assert!(!answered);
+        assert_eq!(took, Duration::from_millis(STALL_MS));
     }
 
     #[tokio::test(start_paused = true)]

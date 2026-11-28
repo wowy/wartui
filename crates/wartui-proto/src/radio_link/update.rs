@@ -515,6 +515,12 @@ impl<'a> Sender<'a> {
         }
     }
 
+    /// The session byte every op it sends names, which an `Abort` for it names too.
+    #[must_use]
+    pub const fn session(&self) -> u8 {
+        self.session
+    }
+
     /// Where the sender stands.
     #[must_use]
     pub fn stage(&self) -> Stage {

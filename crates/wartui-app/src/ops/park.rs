@@ -83,7 +83,7 @@ async fn keep_read(
                 Some(LinkEvent::Connected(_) | LinkEvent::Disconnected { .. }) => {
                     announced.send_replace(link.announced().cloned());
                 }
-                Some(LinkEvent::Message(_) | LinkEvent::Garbled(_)) => {}
+                Some(LinkEvent::Again(_) | LinkEvent::Message(_) | LinkEvent::Garbled(_)) => {}
                 None => break,
             },
         }

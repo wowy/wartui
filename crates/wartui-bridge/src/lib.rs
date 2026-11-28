@@ -9,13 +9,14 @@
 //! through its C6 ([`ble`]). A Bluetooth scan finds a bridge by the id it advertises, its last two
 //! octets, and never by its name, which is a label for a person and free to change. Both admit
 //! what the bridge sends through one rule, that a connection starts at its first `Ready`
-//! (`gate`). They differ where the links do. Both ask with `Identify`
-//! until a `Ready` answers. USB also sends a keepalive, since the P4's USB gate closes after 15 s
-//! of silence; a Bluetooth subscription is the attachment and that gate never closes on silence,
-//! so Bluetooth sends none. A Bluetooth write is a fragment of the stream, so each connection's
-//! first starts with a `0x00` to end any partial frame. And over Bluetooth, the P4's notice that a
-//! USB host took the bridge reads as the link going down, with the central still subscribed for
-//! the handback.
+//! (`gate`). A later `Ready` of the same life goes up as [`LinkEvent::Again`], since an update
+//! reads its outcome from the answers to its `Identify` polls. They differ where the links do.
+//! Both ask with `Identify` until a `Ready` answers. USB also sends a keepalive, since the P4's
+//! USB gate closes after 15 s of silence; a Bluetooth subscription is the attachment and that
+//! gate never closes on silence, so Bluetooth sends none. A Bluetooth write is a fragment of the
+//! stream, so each connection's first starts with a `0x00` to end any partial frame. And over
+//! Bluetooth, the P4's notice that a USB host took the bridge reads as the link going down, with
+//! the central still subscribed for the handback.
 //!
 //! **A Bluetooth link is closed before the process exits.** The bridge serves a central for as
 //! long as it stays subscribed, and a process that exits with the link up leaves BlueZ connected
@@ -146,6 +147,18 @@ impl BridgeInfo {
         }
     }
 
+    /// What its `Ready`'s frozen core says, which every bridge answers with.
+    #[must_use]
+    pub fn core(&self) -> BridgeCore {
+        BridgeCore {
+            mac: self.mac,
+            image: self.image,
+            version: self.version,
+            trial: self.trial,
+            uptime_ms: self.uptime_ms,
+        }
+    }
+
     /// The `Ready` this bridge announces itself with, `uptime_ms` into its life.
     #[must_use]
     pub fn ready(&self, uptime_ms: u32) -> Ready {
@@ -168,6 +181,21 @@ impl BridgeInfo {
     }
 }
 
+/// What a `Ready`'s frozen core says of the bridge: the fields an update's outcome is read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BridgeCore {
+    /// The bridge's MAC.
+    pub mac: Mac,
+    /// The digest appended to the P4's booted image, `None` when it cannot read one.
+    pub image: Option<[u8; DIGEST_LEN]>,
+    /// The P4 firmware's version.
+    pub version: Version,
+    /// Where the booted image's trial stands.
+    pub trial: Trial,
+    /// How long the bridge had been up when it sent the `Ready`.
+    pub uptime_ms: u32,
+}
+
 /// Something that happened on the link.
 // `Message` is much larger than the other variants because it carries an
 // inline node record. Boxing it would mean an allocation for every frame
@@ -179,6 +207,9 @@ impl BridgeInfo {
 pub enum LinkEvent {
     /// A bridge came up and its protocol version was accepted.
     Connected(BridgeInfo),
+    /// A `Ready` from a life this connection has already reported: an answer to another
+    /// `Identify`. It starts nothing; a caller that asked reads the bridge's state from it.
+    Again(BridgeCore),
     /// The link went away, or is up and not serving this host ([`DisconnectCause`] says which).
     /// The transport keeps trying to reconnect.
     Disconnected {
@@ -193,6 +224,19 @@ pub enum LinkEvent {
     /// A frame arrived that could not be decoded. Counted rather than fatal:
     /// resets and cable events produce these, and the framing recovers.
     Garbled(LinkError),
+}
+
+impl LinkEvent {
+    /// The core of the `Ready` this event carries, and whether it is a new life: `Connected` is
+    /// one, `Again` is not. `None` for any other event.
+    #[must_use]
+    pub fn ready(&self) -> Option<(BridgeCore, bool)> {
+        match self {
+            Self::Connected(info) => Some((info.core(), true)),
+            Self::Again(core) => Some((*core, false)),
+            _ => None,
+        }
+    }
 }
 
 /// Why a link is down, as far as the transport can tell. Only the Bluetooth transport names a
@@ -368,7 +412,8 @@ pub enum SendError {
 /// The engine's end of the link.
 ///
 /// A transport announces a bridge once per life, as [`LinkEvent::Connected`], so the handle keeps
-/// the announcement it has read ([`LinkHandle::announced`]) for whoever holds it next.
+/// the announcement it has read ([`LinkHandle::announced`]) for whoever holds it next, and the core
+/// of the last `Ready` it has read, of either kind ([`LinkHandle::reached`]).
 #[derive(Debug)]
 pub struct LinkHandle {
     events: mpsc::Receiver<LinkEvent>,
@@ -383,6 +428,9 @@ pub struct LinkHandle {
     /// The bridge the link has announced now: the last `Connected` read, until a
     /// `Disconnected` or the transport's end.
     announced: Option<BridgeInfo>,
+    /// The core of the last `Ready` read, `Connected` or `Again`, until a `Disconnected` or the
+    /// transport's end.
+    reached: Option<BridgeCore>,
 }
 
 impl LinkHandle {
@@ -402,8 +450,15 @@ impl LinkHandle {
     pub async fn recv(&mut self) -> Option<LinkEvent> {
         let event = self.events.recv().await;
         match &event {
-            Some(LinkEvent::Connected(info)) => self.announced = Some(info.clone()),
-            Some(LinkEvent::Disconnected { .. }) | None => self.announced = None,
+            Some(LinkEvent::Connected(info)) => {
+                self.announced = Some(info.clone());
+                self.reached = Some(info.core());
+            }
+            Some(LinkEvent::Again(core)) => self.reached = Some(*core),
+            Some(LinkEvent::Disconnected { .. }) | None => {
+                self.announced = None;
+                self.reached = None;
+            }
             Some(LinkEvent::Message(_) | LinkEvent::Garbled(_)) => {}
         }
         event
@@ -414,6 +469,13 @@ impl LinkHandle {
     #[must_use]
     pub fn announced(&self) -> Option<&BridgeInfo> {
         self.announced.as_ref()
+    }
+
+    /// The core of the last `Ready` [`Self::recv`] has read, a new life's or a repeat's, or
+    /// `None` once a `Disconnected` or the transport's end follows it.
+    #[must_use]
+    pub fn reached(&self) -> Option<&BridgeCore> {
+        self.reached.as_ref()
     }
 
     /// Queue a command that answers a node's heartbeat.
@@ -520,6 +582,7 @@ pub fn link_pair() -> (LinkHandle, LinkPlumbing) {
             written: written_rx,
             running: None,
             announced: None,
+            reached: None,
         },
         LinkPlumbing {
             events: event_tx,
@@ -823,6 +886,21 @@ mod tests {
         handle.recv().await.expect("the announcement");
         handle.recv().await.expect("the fault");
         assert_eq!(handle.announced(), Some(&bridge()), "a message keeps it");
+    }
+
+    #[tokio::test]
+    async fn link_handle_holds_repeat_core_when_bridge_answers_again() {
+        let (mut handle, plumbing) = link_pair();
+        plumbing.events.send(LinkEvent::Connected(bridge())).await.expect("the link reads");
+        let again = BridgeCore { uptime_ms: 5_000, trial: Trial::OnTrial, ..bridge().core() };
+        plumbing.events.send(LinkEvent::Again(again)).await.expect("the link reads");
+        let first = handle.recv().await.expect("the announcement");
+        assert_eq!(first.ready(), Some((bridge().core(), true)));
+        assert_eq!(handle.reached(), Some(&bridge().core()));
+        let repeat = handle.recv().await.expect("the repeat");
+        assert_eq!(repeat.ready(), Some((again, false)));
+        assert_eq!(handle.reached(), Some(&again));
+        assert_eq!(handle.announced(), Some(&bridge()), "a repeat keeps the announcement");
     }
 
     #[tokio::test]

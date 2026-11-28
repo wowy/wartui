@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot, watch};
-use wartui_bridge::pace::PacedSender;
+use wartui_bridge::pace::{self, PacedSender};
 use wartui_bridge::{BridgeInfo, LinkEvent, LinkHandle};
 use wartui_proto::bus::{DownMsg, UpType, UpdateStatus};
 use wartui_proto::fleet::ScanMode;
@@ -317,7 +317,10 @@ pub enum FleetError {
 /// abort, and is the error. So is the first chunk answered `NoImage` once the image is checked
 /// ([`Failure::CacheLost`]), since every session's next chunk meets the same answer. The sessions
 /// keep their outcomes then. A `Begin` for the image the cache already holds is answered
-/// `Verified` at once, and the upload ends there.
+/// `Verified` at once, and the upload ends there. An upload dropped before the P4 verified it, by
+/// `stop` or by its failure, is ended with an `Abort` once the sessions have ended
+/// (`pace::abort`), since the P4 holds its cache session open and its SD log paused until then.
+/// A verified image is never aborted: the nodes are fed from it.
 ///
 /// Every event goes to every session still running, and each reads only its own: its node's
 /// records, and the delivery answers to its own ids, which no two sessions share
@@ -351,12 +354,17 @@ pub async fn drive_fleet(
         tracing::debug!(node = %mac::full(&session.node()), phase = ?phase, "ota phase");
     }
     let mut stopped = false;
+    // The upload's session, once one is dropped before the P4 verified it: the P4 holds it open,
+    // and its SD log waits, until an `Abort` ends it.
+    let mut abandoned = None;
     while sessions.iter().any(|session| session.outcome().is_none()) {
         let mut sends = Vec::new();
         tokio::select! {
             () = &mut stop, if !stopped => {
                 stopped = true;
-                cache = None;
+                if let Some(sender) = cache.take() {
+                    abandoned = Some(sender.session());
+                }
                 let now = now();
                 for session in sessions.iter_mut() {
                     sends.extend(session.cancel(now));
@@ -419,6 +427,7 @@ pub async fn drive_fleet(
                 report(FleetReport::Cached(elapsed));
                 feed(sessions, OtaEvent::Cached, &mut sends);
             } else if let Stage::Failed(failure) = sender.stage() {
+                abandoned = Some(sender.session());
                 cache = None;
                 tracing::debug!(failure = ?failure, "ota cache failed");
                 failed = Some(FleetError::Upload(failure));
@@ -470,10 +479,22 @@ pub async fn drive_fleet(
             report(FleetReport::Session(i, &now_progress));
         }
     }
+    if let Some(session) = abandoned {
+        let ended = pace::abort(link, session, HostToBridge::CacheImage, cache_status).await;
+        tracing::debug!(session, ended, "ota cache aborted");
+    }
     if let Some(failure) = failed {
         return Err(failure);
     }
     Ok(sessions.iter().filter_map(|session| session.outcome().cloned()).collect())
+}
+
+/// The status a [`BridgeToHost::CacheImage`] carries.
+fn cache_status(message: &BridgeToHost) -> Option<UpdateStatus> {
+    match message {
+        BridgeToHost::CacheImage(bytes) => pace::status_in(bytes),
+        _ => None,
+    }
 }
 
 /// Hand `event` to every session still running, gathering what they send.

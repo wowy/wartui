@@ -223,14 +223,6 @@ pub const UPDATE_STATUS_MAX: usize = 16;
 /// One encoded `Op::Status`, in transit to the host.
 pub type UpdateStatusBytes = Vec<u8, UPDATE_STATUS_MAX>;
 
-/// The P4's [`BridgeToHost::Log`] after a host frame confirms its image on trial.
-/// `wartui flash-bridge` waits for it after an update, so both ends read the text from here.
-pub const IMAGE_CONFIRMED: &str = "image confirmed by the host";
-
-/// The start of the P4's [`BridgeToHost::Error`] when confirming its image fails; the flash
-/// error follows after a colon.
-pub const IMAGE_NOT_CONFIRMED: &str = "could not confirm the image";
-
 /// The P4's [`BridgeToHost::Error`] while no GPS receiver answers on its port, repeated with
 /// every announcement. The simulator sends it too, as a P4 with nothing on the port.
 pub const NO_GPS_RECEIVER: &str = "no GPS receiver answered on the I2C bus (GPIO7/GPIO8)";
